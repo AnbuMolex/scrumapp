@@ -29,6 +29,7 @@ import {
   TextField,
   Button,
   CircularProgress,
+  TableContainer,
 } from '@mui/material';
 
 // Icons
@@ -150,9 +151,6 @@ function Dashboard({ user }) {
 
     setLoadingHours(true);
 
-    // Per-employee: get project list (existing endpoint) and derive:
-    // - WIP = employee_project_status in ('Active','Pending')  (adjust if you use only 'Active')
-    // - Crossed ECD = project ECD < today && employee_project_status != 'Completed'
     const nextKpi = {};
     for (const emp of employees) {
       try {
@@ -190,34 +188,25 @@ function Dashboard({ user }) {
     }
     setEmpKpi(nextKpi);
 
-    // Hours donut: sum utilization/project hours across date range for all team employees.
-    // We’ll re-use GET /api/daily-entries/:employeeId/:date and aggregate on the client.
+    // Hours donut aggregation
     let utilHrs = 0;
     let projHrs = 0;
-
     for (const emp of employees) {
       for (const d of dateList) {
         try {
           const { data } = await axios.get(`/api/daily-entries/${emp.employee_id}/${d}`, getAuth());
           const acts = Array.isArray(data?.activities) ? data.activities : [];
           const projs = Array.isArray(data?.projects) ? data.projects : [];
-
-          // utilization hours = sum of activities.hours (no project_id)
           utilHrs += acts.reduce((s, a) => s + Number(a.hours || 0), 0);
-          // project hours = sum of projects.hours
           projHrs += projs.reduce((s, p) => s + Number(p.hours || 0), 0);
-        } catch {
-          /* ignore missing days */
-        }
+        } catch { /* ignore */ }
       }
     }
-
     setUtilizationHours(Number(utilHrs.toFixed(2)));
     setProjectHours(Number(projHrs.toFixed(2)));
     setLoadingHours(false);
   }, [teamId, employees, fromDate, toDate, projectsIndex, today]);
 
-  // Auto-compute when employees list changes or date range changes
   useEffect(() => {
     computeAll();
   }, [computeAll]);
@@ -238,6 +227,56 @@ function Dashboard({ user }) {
     () => teams.map(t => ({ value: String(t.team_id), label: t.team_name })),
     [teams]
   );
+
+  // ---------- Excel-like styling for the employee table ----------
+  const excelTableSx = {
+    tableLayout: 'fixed',
+    borderCollapse: 'collapse',
+    width: '100%',
+    '& th, & td': {
+      border: '1px solid',
+      borderColor: 'divider',
+      padding: '6px 8px',
+      fontSize: 13,
+      lineHeight: 1.35,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    },
+    '& thead th': {
+      position: 'sticky',
+      top: 0,
+      backgroundColor: 'background.paper',
+      zIndex: 2,
+      fontWeight: 700,
+    },
+    '& tbody tr': { height: 36 },
+    '& tbody tr:nth-of-type(odd)': { backgroundColor: 'action.hover' },
+    '& .sticky-col': {
+      position: 'sticky',
+      left: 0,
+      zIndex: 3,
+      backgroundColor: 'background.paper',
+    },
+    '& .cell-mono': {
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    },
+    '& .click-chip': {
+      cursor: 'pointer',
+      userSelect: 'none',
+    },
+  };
+
+  const containerSx = {
+    width: '100%',
+    maxHeight: 'calc(100vh - 340px)', // ample space under filters
+  };
+
+  const colWidths = {
+    emp: 260,
+    wip: 120,
+    crossed: 150,
+  };
 
   return (
     <Container maxWidth="xl" sx={{ py: 2 }}>
@@ -321,82 +360,97 @@ function Dashboard({ user }) {
       </Paper>
 
       <Grid container spacing={2}>
-        {/* Employee KPI cards */}
+        {/* LEFT: Excel-like Employees table */}
         <Grid item xs={12} md={8}>
-          <Card sx={{ borderRadius: 2 }}>
-            <CardHeader
-              title="Employees: Project KPIs"
-              subheader={teamId ? 'Crossed ECD and WIP per employee' : 'Select a team to view'}
-            />
+          <Paper elevation={1} sx={{ width: '100%', overflow: 'hidden', borderRadius: 2 }}>
+            <Box px={2} py={1.5}>
+              <Typography variant="subtitle1" fontWeight={700}>
+                Employees — WIP & Crossed ECD
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Click counts to view project lists
+              </Typography>
+            </Box>
             <Divider />
-            <CardContent sx={{ pt: 1 }}>
-              {loadingEmp ? (
-                <Stack alignItems="center" sx={{ py: 6 }}>
-                  <CircularProgress />
-                </Stack>
-              ) : employees.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">No data</Typography>
-              ) : (
-                <Grid container spacing={1}>
-                  {employees.map(emp => {
-                    const k = empKpi[emp.employee_id] || { crossedECD: 0, wip: 0, crossedList: [], wipList: [] };
-                    return (
-                      <Grid key={emp.employee_id} item xs={12} sm={6} lg={4}>
-                        <Paper
-                          elevation={0}
-                          sx={{
-                            p: 1.5,
-                            borderRadius: 2,
-                            border: '1px solid',
-                            borderColor: 'divider',
-                          }}
-                        >
-                          <Stack spacing={1}>
-                            <Typography variant="subtitle2" noWrap>
-                              {emp.first_name} {emp.last_name}
-                            </Typography>
-                            <Stack direction="row" spacing={1} alignItems="center">
+            {loadingEmp ? (
+              <Stack alignItems="center" sx={{ py: 6 }}>
+                <CircularProgress />
+              </Stack>
+            ) : employees.length === 0 ? (
+              <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                {teamId ? 'No employees found.' : 'Select a team to view employees.'}
+              </Typography>
+            ) : (
+              <>
+                <TableContainer sx={containerSx}>
+                  <Table stickyHeader size="small" sx={excelTableSx}>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell className="sticky-col" sx={{ width: colWidths.emp }}>Employee</TableCell>
+                        <TableCell align="right" sx={{ width: colWidths.wip }}>WIP</TableCell>
+                        <TableCell align="right" sx={{ width: colWidths.crossed }}>Crossed ECD</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {employees.map(emp => {
+                        const k = empKpi[emp.employee_id] || { crossedECD: 0, wip: 0, crossedList: [], wipList: [] };
+                        const fullName = `${emp.first_name || ''} ${emp.last_name || ''}`.trim();
+                        return (
+                          <TableRow key={emp.employee_id} hover>
+                            <TableCell className="sticky-col">
+                              <Typography className="cell-mono" title={fullName}>{fullName || '-'}</Typography>
+                            </TableCell>
+
+                            <TableCell align="right">
                               <Chip
-                                icon={<WarningAmberIcon />}
-                                label={`Crossed ECD: ${k.crossedECD}`}
                                 size="small"
-                                color="error"
-                                variant="outlined"
-                                onClick={() =>
-                                  openModalFor(
-                                    `${emp.first_name} ${emp.last_name} — Crossed ECD Projects`,
-                                    k.crossedList
-                                  )
-                                }
-                                sx={{ cursor: 'pointer' }}
-                              />
-                              <Chip
                                 icon={<WorkHistoryIcon />}
-                                label={`WIP: ${k.wip}`}
-                                size="small"
                                 color="primary"
                                 variant="outlined"
+                                label={k.wip}
+                                className="click-chip"
                                 onClick={() =>
-                                  openModalFor(
-                                    `${emp.first_name} ${emp.last_name} — WIP Projects`,
-                                    k.wipList
-                                  )
+                                  openModalFor(`${fullName} — WIP Projects`, k.wipList)
                                 }
-                                sx={{ cursor: 'pointer' }}
                               />
-                            </Stack>
-                          </Stack>
-                        </Paper>
-                      </Grid>
-                    );
-                  })}
-                </Grid>
-              )}
-            </CardContent>
-          </Card>
+                            </TableCell>
+
+                            <TableCell align="right">
+                              <Chip
+                                size="small"
+                                icon={<WarningAmberIcon />}
+                                color="error"
+                                variant="outlined"
+                                label={k.crossedECD}
+                                className="click-chip"
+                                onClick={() =>
+                                  openModalFor(`${fullName} — Crossed ECD Projects`, k.crossedList)
+                                }
+                              />
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+                <Divider />
+                <Stack direction="row" spacing={2} sx={{ px: 2, py: 1 }}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Chip size="small" color="primary" variant="outlined" label="WIP" icon={<WorkHistoryIcon />} />
+                    <Typography variant="caption" color="text.secondary">Active or Pending</Typography>
+                  </Stack>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Chip size="small" color="error" variant="outlined" label="Crossed ECD" icon={<WarningAmberIcon />} />
+                    <Typography variant="caption" color="text.secondary">ECD passed & not Completed</Typography>
+                  </Stack>
+                </Stack>
+              </>
+            )}
+          </Paper>
         </Grid>
 
-        {/* Donut chart */}
+        {/* RIGHT: Donut chart */}
         <Grid item xs={12} md={4}>
           <Card sx={{ height: '100%', borderRadius: 2 }}>
             <CardHeader
@@ -451,7 +505,7 @@ function Dashboard({ user }) {
           {modalRows.length === 0 ? (
             <Typography variant="body2" color="text.secondary">No projects found.</Typography>
           ) : (
-            <Table size="small">
+            <Table size="small" sx={{ '& th, & td': { whiteSpace: 'nowrap' } }}>
               <TableHead>
                 <TableRow>
                   <TableCell>Project ID</TableCell>

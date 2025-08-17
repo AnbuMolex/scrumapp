@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import {
-  Box,Button,TextField,Typography,Paper,MenuItem,InputAdornment,IconButton,Alert,Divider,LinearProgress,List,ListItem,ListItemText,Grid,
+  Box, Button, TextField, Typography, Paper, MenuItem,
+  InputAdornment, IconButton, Alert, LinearProgress,
+  List, ListItem, ListItemText, Grid,
 } from '@mui/material';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
@@ -72,7 +74,7 @@ function Register({ user }) {
     }
   };
 
-  // Import handlers
+  // Import handlers (unchanged)
   const onChooseImportFile = (e) => {
     setImpFile(e.target.files?.[0] || null);
     setImpError('');
@@ -111,10 +113,10 @@ function Register({ user }) {
   const isAdmin = String(user?.role || '').toLowerCase() === 'admin';
 
   return (
-    <Box sx={{ maxWidth: 1000, mx: 'auto', mt: 6 }}>
+    <Box sx={{ maxWidth: 500, mx: 'auto', mt: 6 }}>
       <Grid container spacing={3}>
         {/* Left: Register form */}
-        <Grid item xs={12} md={6}>
+        <Grid item xs={12} md={8}>
           <Paper sx={{ p: 4, borderRadius: 3 }}>
             <Typography variant="h5" gutterBottom>
               Register New User
@@ -183,6 +185,7 @@ function Register({ user }) {
                   </MenuItem>
                 ))}
               </TextField>
+
               <TextField
                 label="Role"
                 select
@@ -195,6 +198,7 @@ function Register({ user }) {
                 <MenuItem value="team_lead">Team Lead</MenuItem>
                 <MenuItem value="admin">Admin</MenuItem>
               </TextField>
+
               {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
               {successMessage && <Alert severity="success" sx={{ mb: 2 }}>{successMessage}</Alert>}
 
@@ -205,55 +209,60 @@ function Register({ user }) {
           </Paper>
         </Grid>
 
-        {/* Right: Import employees (Admin only) */}
+        {/* Right: Compact import block (Admin only) */}
         {isAdmin && (
-          <Grid item xs={12} md={6}>
-            <Paper sx={{ p: 4, borderRadius: 3 }}>
-              <Typography variant="h6" gutterBottom>
-                Import Employees from Excel/CSV
-              </Typography>
-              <Typography variant="body2" sx={{ mb: 2 }}>
-                Expected columns (case-insensitive): <b>First Name</b>, <b>Last Name</b>, <b>Email</b>, <b>Password</b>.
-                Optional: <b>Role</b> (admin | team_lead | employee) and either <b>Team Name</b> or <b>Team ID</b>.
-                <br />Password is <b>required</b> for new employees; for existing employees, leave it blank to keep their current password.
-              </Typography>
-              <Divider sx={{ mb: 2 }} />
-              <input
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                onChange={onChooseImportFile}
-                disabled={impBusy}
-              />
-              <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center' }}>
-                <Button variant="contained" onClick={handleImport} disabled={impBusy || !impFile}>
-                  Upload & Import
+          <Grid item xs={12} md={4}>
+            <Paper sx={{ p: 2, borderRadius: 2 }}>
+              {/* No heading/description text per request */}
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={onChooseImportFile}
+                  disabled={impBusy}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  variant="contained"
+                  size="small"
+                  onClick={handleImport}
+                  disabled={impBusy || !impFile}
+                >
+                  Upload
                 </Button>
-                {impBusy && <Box sx={{ flex: 1 }}><LinearProgress /></Box>}
               </Box>
-              {impError && <Alert severity="error" sx={{ mt: 2 }}>{impError}</Alert>}
+
+              {impBusy && <Box sx={{ mt: 1 }}><LinearProgress /></Box>}
+              {impError && <Alert severity="error" sx={{ mt: 1 }}>{impError}</Alert>}
+
               {impResult && (
-                <Box sx={{ mt: 3 }}>
-                  <Alert severity="success">{impResult.message}</Alert>
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="subtitle1">Summary</Typography>
-                    <List dense>
-                      <ListItem><ListItemText primary={`Inserted: ${impResult.summary?.inserted ?? 0}`} /></ListItem>
-                      <ListItem><ListItemText primary={`Updated: ${impResult.summary?.updated ?? 0}`} /></ListItem>
-                      <ListItem><ListItemText primary={`Skipped: ${impResult.summary?.skipped ?? 0}`} /></ListItem>
-                    </List>
-                    {impResult.summary?.errors?.length ? (
-                      <>
-                        <Typography variant="subtitle2" sx={{ mt: 1 }}>Row Errors</Typography>
-                        <List dense sx={{ maxHeight: 200, overflow: 'auto', border: '1px solid #eee' }}>
-                          {impResult.summary.errors.map((e, idx) => (
-                            <ListItem key={idx}>
-                              <ListItemText primary={`Row ${e.row}: ${e.reason}`} />
-                            </ListItem>
-                          ))}
-                        </List>
-                      </>
-                    ) : null}
-                  </Box>
+                <Box sx={{ mt: 2 }}>
+                  <Alert severity="success" sx={{ mb: 1 }}>{impResult.message}</Alert>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Summary</Typography>
+                  <List dense sx={{ py: 0 }}>
+                    <ListItem sx={{ py: 0 }}>
+                      <ListItemText primary={`Inserted: ${impResult.summary?.inserted ?? 0}`} />
+                    </ListItem>
+                    <ListItem sx={{ py: 0 }}>
+                      <ListItemText primary={`Updated: ${impResult.summary?.updated ?? 0}`} />
+                    </ListItem>
+                    <ListItem sx={{ py: 0 }}>
+                      <ListItemText primary={`Skipped: ${impResult.summary?.skipped ?? 0}`} />
+                    </ListItem>
+                  </List>
+
+                  {impResult.summary?.errors?.length ? (
+                    <>
+                      <Typography variant="caption">Row Errors</Typography>
+                      <List dense sx={{ maxHeight: 120, overflow: 'auto', border: '1px solid #eee', mt: 0.5 }}>
+                        {impResult.summary.errors.map((e, idx) => (
+                          <ListItem key={idx} sx={{ py: 0.5 }}>
+                            <ListItemText primary={`Row ${e.row}: ${e.reason}`} />
+                          </ListItem>
+                        ))}
+                      </List>
+                    </>
+                  ) : null}
                 </Box>
               )}
             </Paper>
@@ -263,4 +272,5 @@ function Register({ user }) {
     </Box>
   );
 }
+
 export default Register;
