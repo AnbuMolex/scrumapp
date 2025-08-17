@@ -117,20 +117,13 @@ function DailyEntry({ user }) {
         { ...getAuth(), validateStatus: s => s >= 200 && s < 500 }
       );
       if (res.status === 200 && Array.isArray(res.data)) {
-        const rows = res.data.map(p => ({
-          depu_id: p.depu_id,
-          project_id: p.project_id,
-          project_name: p.project_name,
-    // planned dates always from Projects table (read-only in UI)
-          planned_start: p.project_planned_start_date || '',
-          planned_end:   p.project_planned_end_date || '',
-    // employee actuals
-          actual_start: p.employee_project_start_date || '',
-          actual_end:   p.employee_project_end_date || '',
-          status:       p.employee_project_status || 'Active',
-          comments:     p.employee_project_comments || '',
+        const rows = res.data.map(u => ({
+          utilization_id: u.utilization_id,
+          activity:       u.activity || '',
+          hours:          u.utilization_hours ?? '',
+          comments:       u.utilization_comments || ''
         }));
-        setProjectEntries(rows);
+        setUtilizationEntries(rows);
       } else {
         setProjectEntries([]);
       }
