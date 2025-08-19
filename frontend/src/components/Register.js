@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
   Box, Button, TextField, Typography, Paper, MenuItem,
   InputAdornment, IconButton, Alert, LinearProgress,
-  List, ListItem, ListItemText, Grid,
+  List, ListItem, ListItemText, Grid, FormControl, InputLabel, Select
 } from '@mui/material';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
@@ -52,7 +52,7 @@ function Register({ user }) {
         lastName,
         email,
         password,
-        teamId: teamId === '' ? null : parseInt(teamId),
+        teamId: teamId === '' ? null : parseInt(teamId, 10),
         role,
       };
 
@@ -64,17 +64,14 @@ function Register({ user }) {
       setPassword('');
       setTeamId('');
       setRole('employee');
-
-      setTimeout(() => {
-        navigate('/login');
-      }, 2000);
+      // setTimeout(() => navigate('/login'), 2000);
     } catch (err) {
       console.error('Registration error:', err);
       setError(err.response?.data?.message || 'Registration failed. Please try again.');
     }
   };
 
-  // Import handlers (unchanged)
+  // Import handlers
   const onChooseImportFile = (e) => {
     setImpFile(e.target.files?.[0] || null);
     setImpError('');
@@ -121,8 +118,11 @@ function Register({ user }) {
             <Typography variant="h5" gutterBottom>
               Register New User
             </Typography>
-            <form onSubmit={handleSubmit}>
+            <form onSubmit={handleSubmit} noValidate>
               <TextField
+                id="firstName"
+                name="given-name"
+                autoComplete="given-name"
                 label="First Name"
                 value={firstName}
                 onChange={(e) => setFirstName(e.target.value)}
@@ -132,6 +132,9 @@ function Register({ user }) {
               />
 
               <TextField
+                id="lastName"
+                name="family-name"
+                autoComplete="family-name"
                 label="Last Name"
                 value={lastName}
                 onChange={(e) => setLastName(e.target.value)}
@@ -141,7 +144,10 @@ function Register({ user }) {
               />
 
               <TextField
-                label="Username (Email)"
+                id="email"
+                name="email"
+                autoComplete="email"
+                label="Email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -151,6 +157,9 @@ function Register({ user }) {
               />
 
               <TextField
+                id="password"
+                name="new-password"
+                autoComplete="new-password"
                 label="Password"
                 type={showPassword ? 'text' : 'password'}
                 value={password}
@@ -161,7 +170,7 @@ function Register({ user }) {
                 InputProps={{
                   endAdornment: (
                     <InputAdornment position="end">
-                      <IconButton onClick={() => setShowPassword((prev) => !prev)} edge="end">
+                      <IconButton onClick={() => setShowPassword((prev) => !prev)} edge="end" aria-label="toggle password visibility">
                         {showPassword ? <VisibilityOff /> : <Visibility />}
                       </IconButton>
                     </InputAdornment>
@@ -169,35 +178,40 @@ function Register({ user }) {
                 }}
               />
 
-              <TextField
-                label="Team"
-                select
-                value={teamId}
-                onChange={(e) => setTeamId(e.target.value)}
-                fullWidth
-                required
-                sx={{ mb: 2 }}
-              >
-                <MenuItem value="">-- Select Team --</MenuItem>
-                {teams.map((team) => (
-                  <MenuItem key={team.team_id} value={team.team_id}>
-                    {team.team_name}
-                  </MenuItem>
-                ))}
-              </TextField>
+              {/* Team Select with proper label association */}
+              <FormControl fullWidth required sx={{ mb: 2 }}>
+                <InputLabel id="team-label">Team</InputLabel>
+                <Select
+                  labelId="team-label"
+                  id="team"
+                  label="Team"
+                  value={teamId}
+                  onChange={(e) => setTeamId(e.target.value)}
+                >
+                  <MenuItem value="">-- Select Team --</MenuItem>
+                  {teams.map((team) => (
+                    <MenuItem key={team.team_id} value={team.team_id}>
+                      {team.team_name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
 
-              <TextField
-                label="Role"
-                select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                fullWidth
-                sx={{ mb: 2 }}
-              >
-                <MenuItem value="employee">Employee</MenuItem>
-                <MenuItem value="team_lead">Team Lead</MenuItem>
-                <MenuItem value="admin">Admin</MenuItem>
-              </TextField>
+              {/* Role Select with proper label association */}
+              <FormControl fullWidth sx={{ mb: 2 }}>
+                <InputLabel id="role-label">Role</InputLabel>
+                <Select
+                  labelId="role-label"
+                  id="role"
+                  label="Role"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                >
+                  <MenuItem value="employee">Employee</MenuItem>
+                  <MenuItem value="team_lead">Team Lead</MenuItem>
+                  <MenuItem value="admin">Admin</MenuItem>
+                </Select>
+              </FormControl>
 
               {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
               {successMessage && <Alert severity="success" sx={{ mb: 2 }}>{successMessage}</Alert>}
@@ -213,15 +227,24 @@ function Register({ user }) {
         {isAdmin && (
           <Grid item xs={12} md={4}>
             <Paper sx={{ p: 2, borderRadius: 2 }}>
-              {/* No heading/description text per request */}
-              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              {/* Accessible file chooser */}
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input
+                  id="employee-import"
                   type="file"
                   accept=".xlsx,.xls,.csv"
                   onChange={onChooseImportFile}
                   disabled={impBusy}
-                  style={{ flex: 1 }}
+                  style={{ display: 'none' }}
                 />
+                <label htmlFor="employee-import">
+                  <Button variant="outlined" component="span" size="small" disabled={impBusy}>
+                    Choose File
+                  </Button>
+                </label>
+                <Typography variant="body2" sx={{ minWidth: 120, flex: 1 }}>
+                  {impFile?.name || 'No file chosen'}
+                </Typography>
                 <Button
                   variant="contained"
                   size="small"

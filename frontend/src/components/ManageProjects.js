@@ -23,6 +23,39 @@ const statusChip = (status) => {
   return { label: status || '—', color: 'default' };
 };
 
+// ---------- Date helpers (timezone safe) ----------
+const pad2 = (n) => String(n).padStart(2, '0');
+const formatLocalYMD = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+/**
+ * Convert various date-ish inputs to 'YYYY-MM-DD' without losing the calendar day.
+ * - If already 'YYYY-MM-DD', returns as-is.
+ * - If ISO timestamp (e.g. '2025-01-09T18:30:00.000Z'), converts to LOCAL date (IST) and formats Y-M-D.
+ * - For other strings, tries Date parse then formats LOCAL Y-M-D.
+ */
+const toYMD = (v) => {
+  if (!v) return '';
+  if (typeof v === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;             // already date-only
+    if (/^\d{4}-\d{2}-\d{2}T/.test(v)) {                     // ISO timestamp string
+      const dt = new Date(v);
+      if (!isNaN(dt)) return formatLocalYMD(dt);
+      return '';
+    }
+    const dt = new Date(v);
+    if (!isNaN(dt)) return formatLocalYMD(dt);
+    return '';
+  }
+  if (v instanceof Date && !isNaN(v)) return formatLocalYMD(v);
+  return '';
+};
+
+// normalize for payloads: '' -> null, else Y-M-D
+const ymdOrNull = (v) => {
+  const y = toYMD(v);
+  return y ? y : null;
+};
+
 function ManageProjects({ user }) {
   const [projects, setProjects] = useState([]);
   const [open, setOpen] = useState(false);
@@ -35,7 +68,8 @@ function ManageProjects({ user }) {
     plannedStartDate: '', plannedEndDate: '',
     actualStartDate: '', actualEndDate: '',
     status: 'Active',
-    estimatedHours: '', actualHours: ''
+    estimatedHours: '', actualHours: '',
+    comments: '',
   });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ text: '', type: '' });
@@ -51,8 +85,6 @@ function ManageProjects({ user }) {
     () => ({ headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }),
     []
   );
-
-  const toDateOnly = (v) => (v ? String(v).split('T')[0] : '');
 
   const fetchProjects = useCallback(async () => {
     setLoading(true);
@@ -70,25 +102,17 @@ function ManageProjects({ user }) {
     if (user?.role === 'admin') fetchProjects();
   }, [user?.role, fetchProjects]);
 
-  const handleOpen = () => {
+  const resetForm = () =>
     setForm({
       projectId: '', projectName: '', businessUnit: '',
       plannedStartDate: '', plannedEndDate: '',
       actualStartDate: '', actualEndDate: '',
-      status: 'Active', estimatedHours: '', actualHours: ''
+      status: 'Active', estimatedHours: '', actualHours: '',
+      comments: '',
     });
-    setOpen(true);
-  };
 
-  const handleClose = () => {
-    setOpen(false);
-    setForm({
-      projectId: '', projectName: '', businessUnit: '',
-      plannedStartDate: '', plannedEndDate: '',
-      actualStartDate: '', actualEndDate: '',
-      status: 'Active', estimatedHours: '', actualHours: ''
-    });
-  };
+  const handleOpen = () => { resetForm(); setOpen(true); };
+  const handleClose = () => { setOpen(false); resetForm(); };
 
   const handleChange = (field) => (e) => setForm({ ...form, [field]: e.target.value });
 
@@ -102,13 +126,14 @@ function ManageProjects({ user }) {
         projectId: form.projectId.trim(),
         projectName: form.projectName.trim(),
         businessUnit: form.businessUnit.trim(),
-        plannedStartDate: form.plannedStartDate || null,
-        plannedEndDate: form.plannedEndDate || null,
-        actualStartDate: form.actualStartDate || null,
-        actualEndDate: form.actualEndDate || null,
+        plannedStartDate: ymdOrNull(form.plannedStartDate),
+        plannedEndDate: ymdOrNull(form.plannedEndDate),
+        actualStartDate: ymdOrNull(form.actualStartDate),
+        actualEndDate: ymdOrNull(form.actualEndDate),
         status: form.status,
         estimatedHours: form.estimatedHours ? parseFloat(form.estimatedHours) : null,
-        actualHours: form.actualHours ? parseFloat(form.actualHours) : null
+        actualHours: form.actualHours ? parseFloat(form.actualHours) : null,
+        comments: form.comments?.trim() || null,
       };
 
       await axios.post('/api/projects', payload, authHeaders);
@@ -149,13 +174,14 @@ function ManageProjects({ user }) {
       projectId: project.project_id,
       projectName: project.project_name || '',
       businessUnit: project.business_unit || '',
-      plannedStartDate: toDateOnly(project.planned_start_date),
-      plannedEndDate: toDateOnly(project.planned_end_date),
-      actualStartDate: toDateOnly(project.actual_start_date),
-      actualEndDate: toDateOnly(project.actual_end_date),
+      plannedStartDate: toYMD(project.planned_start_date),
+      plannedEndDate: toYMD(project.planned_end_date),
+      actualStartDate: toYMD(project.actual_start_date),
+      actualEndDate: toYMD(project.actual_end_date),
       status: project.status || 'Active',
       estimatedHours: project.estimated_hours ?? '',
-      actualHours: project.actual_hours ?? ''
+      actualHours: project.actual_hours ?? '',
+      comments: project.comments || '',
     });
   };
 
@@ -173,13 +199,14 @@ function ManageProjects({ user }) {
         newProjectId: editRowData.projectId.trim(),
         projectName: editRowData.projectName?.trim(),
         businessUnit: editRowData.businessUnit?.trim(),
-        plannedStartDate: editRowData.plannedStartDate || null,
-        plannedEndDate: editRowData.plannedEndDate || null,
-        actualStartDate: editRowData.actualStartDate || null,
-        actualEndDate: editRowData.actualEndDate || null,
+        plannedStartDate: ymdOrNull(editRowData.plannedStartDate),
+        plannedEndDate: ymdOrNull(editRowData.plannedEndDate),
+        actualStartDate: ymdOrNull(editRowData.actualStartDate),
+        actualEndDate: ymdOrNull(editRowData.actualEndDate),
         status: editRowData.status,
         estimatedHours: editRowData.estimatedHours ? parseFloat(editRowData.estimatedHours) : null,
-        actualHours: editRowData.actualHours ? parseFloat(editRowData.actualHours) : null
+        actualHours: editRowData.actualHours ? parseFloat(editRowData.actualHours) : null,
+        comments: editRowData.comments?.trim() || null,
       };
 
       await axios.put(`/api/projects/${encodeURIComponent(originalProjectId)}`, payload, authHeaders);
@@ -232,7 +259,8 @@ function ManageProjects({ user }) {
   const filteredProjects = projects.filter(p =>
     (p.project_id || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
     (p.project_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (p.business_unit || '').toLowerCase().includes(searchTerm.toLowerCase())
+    (p.business_unit || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (p.comments || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const paginatedProjects = useMemo(() => {
@@ -242,7 +270,6 @@ function ManageProjects({ user }) {
   }, [filteredProjects, page, rowsPerPage]);
 
   const handleChangePage = (_event, newPage) => setPage(newPage);
-
   const handleChangeRowsPerPage = (event) => {
     setRowsPerPage(parseInt(event.target.value, 10));
     setPage(0);
@@ -274,48 +301,39 @@ function ManageProjects({ user }) {
       zIndex: 2,
       fontWeight: 700,
     },
-    '& tbody tr': {
-      height: 36,
-    },
-    '& tbody tr:nth-of-type(odd)': {
-      backgroundColor: 'action.hover',
-    },
+    '& tbody tr': { height: 36 },
+    '& tbody tr:nth-of-type(odd)': { backgroundColor: 'action.hover' },
     '& .sticky-col': {
       position: 'sticky',
       left: 0,
       zIndex: 3,
       backgroundColor: 'background.paper',
     },
-    '& .cell-mono': {
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-    },
+    '& .cell-mono': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
     // Compact editors that don’t “double-border”
     '& .cell-input .MuiOutlinedInput-root': {
       fontSize: 13,
       height: 30,
       backgroundColor: 'background.paper',
     },
-    '& .cell-input .MuiOutlinedInput-input': {
-      padding: '4px 8px',
-    },
-    '& .cell-select .MuiOutlinedInput-input': {
-      padding: '4px 32px 4px 8px',
-    },
+    '& .cell-input .MuiOutlinedInput-input': { padding: '4px 8px' },
+    '& .cell-select .MuiOutlinedInput-input': { padding: '4px 32px 4px 8px' },
   };
 
   const containerSx = {
     width: '100%',
-    maxHeight: 'calc(100vh - 260px)', // good viewport fit
+    maxHeight: 'calc(100vh - 260px)',
   };
 
   const headerCellWidths = {
     id: 150,
     name: 240,
-    bu: 140,
-    date: 140,
-    status: 130,
-    hours: 110,
-    actions: 140,
+    bu: 70,
+    date: 130,
+    comments: 300,
+    status: 110,
+    hours: 80,
+    actions: 120,
   };
 
   return (
@@ -335,11 +353,7 @@ function ManageProjects({ user }) {
                 </Button>
               </Tooltip>
               <Tooltip title="Import .xlsx or .csv">
-                <Button
-                  variant="outlined"
-                  startIcon={<UploadFileIcon />}
-                  onClick={() => setImportOpen(true)}
-                >
+                <Button variant="outlined" startIcon={<UploadFileIcon />} onClick={() => setImportOpen(true)}>
                   Import
                 </Button>
               </Tooltip>
@@ -351,7 +365,7 @@ function ManageProjects({ user }) {
       <Paper elevation={1} sx={{ p: 1.5, mb: 2 }}>
         <TextField
           variant="outlined"
-          placeholder="Search by ID, Name, or BU"
+          placeholder="Search by ID, Name, BU, or Comments"
           size="small"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
@@ -384,6 +398,7 @@ function ManageProjects({ user }) {
                     <TableCell sx={{ width: headerCellWidths.date }}>Planned End</TableCell>
                     <TableCell sx={{ width: headerCellWidths.date }}>Actual Start</TableCell>
                     <TableCell sx={{ width: headerCellWidths.date }}>Actual End</TableCell>
+                    <TableCell sx={{ width: headerCellWidths.comments }}>Comments</TableCell>
                     <TableCell sx={{ width: headerCellWidths.status }}>Status</TableCell>
                     <TableCell align="right" sx={{ width: headerCellWidths.hours }}>Est. Hrs</TableCell>
                     <TableCell align="right" sx={{ width: headerCellWidths.hours }}>Act. Hrs</TableCell>
@@ -440,13 +455,13 @@ function ManageProjects({ user }) {
                             <TextField
                               type="date"
                               size="small"
-                              value={editRowData.plannedStartDate}
+                              value={toYMD(editRowData.plannedStartDate)}
                               onChange={handleEditChange('plannedStartDate')}
                               InputLabelProps={{ shrink: true }}
                               className="cell-input"
                               fullWidth
                             />
-                          ) : toDateOnly(p.planned_start_date)}
+                          ) : toYMD(p.planned_start_date)}
                         </TableCell>
 
                         <TableCell>
@@ -454,13 +469,13 @@ function ManageProjects({ user }) {
                             <TextField
                               type="date"
                               size="small"
-                              value={editRowData.plannedEndDate}
+                              value={toYMD(editRowData.plannedEndDate)}
                               onChange={handleEditChange('plannedEndDate')}
                               InputLabelProps={{ shrink: true }}
                               className="cell-input"
                               fullWidth
                             />
-                          ) : toDateOnly(p.planned_end_date)}
+                          ) : toYMD(p.planned_end_date)}
                         </TableCell>
 
                         <TableCell>
@@ -468,13 +483,13 @@ function ManageProjects({ user }) {
                             <TextField
                               type="date"
                               size="small"
-                              value={editRowData.actualStartDate}
+                              value={toYMD(editRowData.actualStartDate)}
                               onChange={handleEditChange('actualStartDate')}
                               InputLabelProps={{ shrink: true }}
                               className="cell-input"
                               fullWidth
                             />
-                          ) : toDateOnly(p.actual_start_date)}
+                          ) : toYMD(p.actual_start_date)}
                         </TableCell>
 
                         <TableCell>
@@ -482,13 +497,31 @@ function ManageProjects({ user }) {
                             <TextField
                               type="date"
                               size="small"
-                              value={editRowData.actualEndDate}
+                              value={toYMD(editRowData.actualEndDate)}
                               onChange={handleEditChange('actualEndDate')}
                               InputLabelProps={{ shrink: true }}
                               className="cell-input"
                               fullWidth
                             />
-                          ) : toDateOnly(p.actual_end_date)}
+                          ) : toYMD(p.actual_end_date)}
+                        </TableCell>
+
+                        {/* Comments column */}
+                        <TableCell>
+                          {isEditing ? (
+                            <TextField
+                              size="small"
+                              value={editRowData.comments}
+                              onChange={handleEditChange('comments')}
+                              className="cell-input"
+                              fullWidth
+                              placeholder="Comments"
+                            />
+                          ) : (
+                            <Tooltip title={p.comments || ''}>
+                              <span>{p.comments || ''}</span>
+                            </Tooltip>
+                          )}
                         </TableCell>
 
                         <TableCell>
@@ -572,7 +605,7 @@ function ManageProjects({ user }) {
                   })}
                   {filteredProjects.length === 0 && !loading && (
                     <TableRow>
-                      <TableCell colSpan={11}>
+                      <TableCell colSpan={12}>
                         <Box py={3} textAlign="center">
                           No matching projects found.
                         </Box>
@@ -642,22 +675,51 @@ function ManageProjects({ user }) {
               </FormControl>
             </Grid>
             <Grid item xs={12} sm={6}>
-              <TextField fullWidth type="date" label="Planned Start Date" InputLabelProps={{ shrink: true }} value={form.plannedStartDate} onChange={handleChange('plannedStartDate')} />
+              <TextField
+                fullWidth type="date" label="Planned Start Date"
+                InputLabelProps={{ shrink: true }}
+                value={toYMD(form.plannedStartDate)}
+                onChange={handleChange('plannedStartDate')}
+              />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <TextField fullWidth type="date" label="Planned End Date" InputLabelProps={{ shrink: true }} value={form.plannedEndDate} onChange={handleChange('plannedEndDate')} />
+              <TextField
+                fullWidth type="date" label="Planned End Date"
+                InputLabelProps={{ shrink: true }}
+                value={toYMD(form.plannedEndDate)}
+                onChange={handleChange('plannedEndDate')}
+              />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <TextField fullWidth type="date" label="Actual Start Date" InputLabelProps={{ shrink: true }} value={form.actualStartDate} onChange={handleChange('actualStartDate')} />
+              <TextField
+                fullWidth type="date" label="Actual Start Date"
+                InputLabelProps={{ shrink: true }}
+                value={toYMD(form.actualStartDate)}
+                onChange={handleChange('actualStartDate')}
+              />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <TextField fullWidth type="date" label="Actual End Date" InputLabelProps={{ shrink: true }} value={form.actualEndDate} onChange={handleChange('actualEndDate')} />
+              <TextField
+                fullWidth type="date" label="Actual End Date"
+                InputLabelProps={{ shrink: true }}
+                value={toYMD(form.actualEndDate)}
+                onChange={handleChange('actualEndDate')}
+              />
             </Grid>
             <Grid item xs={12} sm={6}>
               <TextField fullWidth label="Estimated Hours" type="number" value={form.estimatedHours} onChange={handleChange('estimatedHours')} inputProps={{ step: '0.1' }} />
             </Grid>
             <Grid item xs={12} sm={6}>
               <TextField fullWidth label="Actual Hours" type="number" value={form.actualHours} onChange={handleChange('actualHours')} inputProps={{ step: '0.1' }} />
+            </Grid>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                label="Comments"
+                value={form.comments}
+                onChange={handleChange('comments')}
+                placeholder="Notes / remarks"
+              />
             </Grid>
           </Grid>
         </DialogContent>
@@ -679,7 +741,7 @@ function ManageProjects({ user }) {
           </Typography>
           <Typography variant="caption" display="block" mb={2}>
             Expected headers (case-insensitive):<br />
-            Project ID | Name | BU | Planned Start | Planned End | Actual Start | Actual End | Status | Est. Hrs | Act. Hrs
+            Project ID | Name | BU | Planned Start | Planned End | Actual Start | Actual End | <strong>Comments</strong> | Status | Est. Hrs | Act. Hrs
           </Typography>
           <Stack direction="row" alignItems="center" spacing={2}>
             <Button component="label" variant="outlined" startIcon={<UploadFileIcon />}>

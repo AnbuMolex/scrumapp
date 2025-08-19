@@ -3,7 +3,7 @@ import axios from 'axios';
 
 // MUI
 import {
-  Box, Container, Grid, Card, CardHeader, CardContent, Divider, Typography, Stack,
+  Box, Container, Grid, Card, CardHeader, Divider, Typography, Stack,
   TextField, Select, MenuItem, Button, IconButton, Tabs, Tab, Table, TableHead, TableRow,
   TableCell, TableBody, Dialog, DialogTitle, DialogContent, DialogActions,
   InputAdornment, Chip, CircularProgress, Snackbar, Alert, Paper
@@ -11,7 +11,6 @@ import {
 
 // Icons
 import EventIcon from '@mui/icons-material/Event';
-import GroupIcon from '@mui/icons-material/Group';
 import SearchIcon from '@mui/icons-material/Search';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
@@ -22,10 +21,15 @@ import EditNoteIcon from '@mui/icons-material/EditNote';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 
 const activityTypes = [
-  'Leave','NA','Meetings','Method development','Supervision','Trainer','Trainee','Software',
+  'Leave','Misc','Meeting','Method development','Correlation','Projects','Supervision','Trainer','CPM','Application','Trainee','Software',
 ];
 
 const norm = (v = '') => String(v || '').trim();
+const toYMD = (v) => {
+  if (v == null) return '';
+  const s = String(v);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : '';
+};
 
 function DailyEntry({ user }) {
   // team & employees
@@ -41,7 +45,7 @@ function DailyEntry({ user }) {
   // data
   const [allProjects, setAllProjects] = useState([]);
   const [utilizationEntries, setUtilizationEntries] = useState([]);
-  const [projectEntries, setProjectEntries] = useState([]); // /employee/:id/projects
+  const [projectEntries, setProjectEntries] = useState([]);
 
   // modal
   const [showProjectModal, setShowProjectModal] = useState(false);
@@ -65,12 +69,63 @@ function DailyEntry({ user }) {
   const W_ACTIONS  = 56;
 
   // Projects widths
-  const W_PID      = 120;
-  const W_PNAME    = 220;
-  const W_DATE     = 120;
-  const W_STATUS   = 140;
-  const W_COMM     = 240;
-  const W_PACT     = 56;
+  const W_PID     = 120;
+  const W_PNAME   = 220;
+  const W_DATE    = 130;
+  const W_STATUS  = 140;
+  const W_P_HOURS = 90;
+  const W_P_COMM  = 240;
+  const W_P_ACT   = 80;
+
+  // --- Excel-like table styles for the Projects tab ---
+  const excelTableSx = {
+    tableLayout: 'fixed',
+    borderCollapse: 'collapse',
+    width: '100%',
+    '& th, & td': {
+      border: '1px solid',
+      borderColor: 'divider',
+      padding: '6px 8px',
+      fontSize: 13,
+      lineHeight: 1.35,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    },
+    '& thead th': {
+      position: 'sticky',
+      top: 0,
+      backgroundColor: 'background.paper',
+      zIndex: 2,
+      fontWeight: 700,
+    },
+    '& tbody tr': { height: 36 },
+    '& tbody tr:nth-of-type(odd)': { backgroundColor: 'action.hover' },
+    '& .sticky-col': {
+      position: 'sticky',
+      left: 0,
+      zIndex: 3,
+      backgroundColor: 'background.paper',
+    },
+    // Compact editors
+    '& .cell-input .MuiOutlinedInput-root': {
+      fontSize: 13,
+      height: 30,
+      backgroundColor: 'background.paper',
+    },
+    '& .cell-input .MuiOutlinedInput-input': { padding: '4px 8px' },
+    '& .cell-select .MuiOutlinedInput-input': { padding: '4px 32px 4px 8px' },
+  };
+
+  const projectColW = {
+    pid: 140,
+    name: 220,
+    date: 132,
+    status: 130,
+    hours: 90,
+    comments: 260,
+    actions: 70,
+  };
 
   // ---------- Boot ----------
   useEffect(() => {
@@ -125,7 +180,7 @@ function DailyEntry({ user }) {
         }));
         setUtilizationEntries(rows);
       } else {
-        setProjectEntries([]);
+        setUtilizationEntries([]);
       }
     } catch {
       setUtilizationEntries([]);
@@ -134,33 +189,42 @@ function DailyEntry({ user }) {
     }
   };
 
-  // Load overall employee↔project rows
+  // Load employee↔project rows FOR THE SELECTED DATE (changed URL)
   const fetchProjects = async () => {
-    if (!selectedEmployeeId) { setProjectEntries([]); return; }
+    if (!selectedEmployeeId || !selectedDate) { setProjectEntries([]); return; }
     setBusy(true);
     try {
       const res = await axios.get(
         `/api/employee/${selectedEmployeeId}/projects`,
-        { ...getAuth(), validateStatus: s => s >= 200 && s < 500 }
+        { ...getAuth(),
+          params: { date: selectedDate },
+          validateStatus: s => s >= 200 && s < 500 }
       );
       let rows = [];
       if (res.status === 200 && Array.isArray(res.data)) {
-        // Enrich with project-level planned dates
-        const byId = new Map(allProjects.map(p => [p.project_id, p]));
         rows = res.data.map(p => {
-          const proj = byId.get(p.project_id) || {};
+          const isCarry = p.depu_id == null; // no DB row for this day
           return {
             depu_id: p.depu_id,
             project_id: p.project_id,
             project_name: p.project_name,
-            // planned from projects (editable locally; see save)
-            planned_start: proj.planned_start_date || '',
-            planned_end: proj.planned_end_date || '',
-            // employee actuals
-            actual_start: p.employee_project_start_date || '',
-            actual_end: p.employee_project_end_date || '',
-            status: p.employee_project_status || 'Active',
-            comments: p.employee_project_comments || '',
+
+            // Optional project-level planned (kept if needed later)
+            project_planned_start: toYMD(p.project_planned_start_date),
+            project_planned_end:   toYMD(p.project_planned_end_date),
+
+            // Actual dates (from the day’s row if present; carried otherwise)
+            emp_actual_start: toYMD(p.employee_project_start_date),
+            emp_actual_end:   toYMD(p.employee_project_end_date),
+
+            // Per-day fields: blank if carried
+            emp_status:   p.employee_project_status || 'Active',
+            emp_hours:    isCarry ? '' : (p.employee_project_hours ?? ''),
+            emp_comments: isCarry ? '' : (p.employee_project_comments || ''),
+
+            // Employee planned (editable columns remain unchanged)
+            emp_planned_start: toYMD(p.employee_planned_start_date),
+            emp_planned_end:   toYMD(p.employee_planned_end_date),
           };
         });
       }
@@ -215,16 +279,26 @@ function DailyEntry({ user }) {
     }
   };
 
-  // ---------- Projects handlers ----------
+  // ---------- Project handlers ----------
   const changeProj = (projectId, field, value) =>
     setProjectEntries(prev => prev.map(r => (r.project_id === projectId ? { ...r, [field]: value } : r)));
 
   const removeProj = async (projectId) => {
     try {
-      await axios.delete(`/api/employee/${selectedEmployeeId}/projects/${projectId}`, getAuth());
+      await axios.delete(
+        `/api/employee/${selectedEmployeeId}/projects/${encodeURIComponent(projectId)}`,
+        { ...getAuth(),params: { date: selectedDate}}
+      );
+      setToast({ open: true, severity: 'success', msg: 'Project removed.' });
       fetchProjects();
-    } catch {
-      setToast({ open: true, severity: 'error', msg: 'Failed to remove project.' });
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        // likely a carried-forward row with no DB record for this date
+        setProjectEntries(prev => prev.filter(r => r.project_id !== projectId));
+        setToast({ open: true, severity: 'info', msg: 'Nothing to delete for this date.' });
+      } else {
+        setToast({ open: true, severity: 'error', msg: 'Failed to remove project.' });
+      }
     }
   };
 
@@ -246,12 +320,13 @@ function DailyEntry({ user }) {
           depu_id: null,
           project_id: p.project_id,
           project_name: p.project_name,
-          planned_start: p.planned_start_date || '',
-          planned_end: p.planned_end_date || '',
-          actual_start: '',
-          actual_end: '',
-          status: 'Active',
-          comments: '',
+          emp_planned_start: p.planned_start_date ||'',
+          emp_planned_end: '',
+          emp_actual_start: '',
+          emp_actual_end: '',
+          emp_status: 'Active',
+          emp_comments: '',
+          emp_hours: 0,
         }))
     ];
     setProjectEntries(merged);
@@ -290,21 +365,37 @@ function DailyEntry({ user }) {
         activities
       }, getAuth());
 
-      // 2) overall employee↔project upserts (parallel)
+      // 2) employee↔project rows (POST new for date, PUT existing for date)
       const projPayloads = projectEntries
         .filter(p => norm(p.project_id))
-        .map(p => axios.post(`/api/employee/${selectedEmployeeId}/projects`, {
-          projectId: norm(p.project_id),
-          projectName: norm(p.project_name) || null,
-          // planned saved per-employee (backend: add columns employee_planned_start_date/employee_planned_end_date)
-          plannedStart: p.planned_start || null,
-          plannedEnd: p.planned_end || null,
-          // actuals saved per-employee (existing columns)
-          startDate: p.actual_start || null,   // employee_project_start_date
-          endDate: p.actual_end || null,       // employee_project_end_date
-          status: p.status || 'Active',
-          comments: norm(p.comments) || null,
-        }, getAuth()));
+        .map(p => {
+          const base = {
+            entryDate:   selectedDate,
+            projectName: norm(p.project_name) || null,
+            plannedStart: p.emp_planned_start || null,
+            plannedEnd:   p.emp_planned_end   || null,
+            startDate:    p.emp_actual_start  || null,
+            endDate:      p.emp_actual_end    || null,
+            status:       p.emp_status || 'Active',
+            comments:     norm(p.emp_comments) || null,
+            hours:        p.emp_hours === '' ? 0 : Number(p.emp_hours),
+          };
+          if (p.depu_id) {
+            // Update for this date
+            return axios.put(
+              `/api/employee/${selectedEmployeeId}/projects/${encodeURIComponent(p.project_id)}`,
+              base,
+              getAuth()
+            );
+          }
+          // Create/upsert for this date
+          return axios.post(
+            `/api/employee/${selectedEmployeeId}/projects`,
+            { projectId: norm(p.project_id), ...base },
+            getAuth()
+          );
+        });
+
       await Promise.all(projPayloads);
 
       setToast({ open: true, severity: 'success', msg: 'Saved successfully.' });
@@ -337,7 +428,6 @@ function DailyEntry({ user }) {
       </Stack>
 
       <Grid container spacing={2} alignItems="flex-start">
-        {/* Single, fixed panel with header controls (team inside header) */}
         <Grid item xs="auto">
           <Card sx={{ borderRadius: 2, width: RIGHT_PANEL_W }}>
             <CardHeader
@@ -345,7 +435,7 @@ function DailyEntry({ user }) {
               title={user.role === 'employee' ? 'My Daily Entry' : 'Employee Daily Entry'}
               action={
                 <Stack direction="row" alignItems="center" spacing={1}>
-                  {/* Team inside the box (always visible) */}
+                  {/* Team */}
                   <Select
                     size="small" displayEmpty value={selectedTeamId || ''}
                     onChange={e => setSelectedTeamId(e.target.value)}
@@ -472,63 +562,108 @@ function DailyEntry({ user }) {
                             </Alert>
                           )}
 
-                          <Table size="small" stickyHeader>
+                          <Table size="small" stickyHeader sx={excelTableSx}>
                             <TableHead>
                               <TableRow>
-                                <TableCell sx={{ width: W_PID }}>Project ID</TableCell>
-                                <TableCell sx={{ width: W_PNAME }}>Name</TableCell>
-                                <TableCell sx={{ width: W_DATE }}>Planned Start</TableCell>
-                                <TableCell sx={{ width: W_DATE }}>Planned ECD</TableCell>
-                                <TableCell sx={{ width: W_DATE }}>Actual Start</TableCell>
-                                <TableCell sx={{ width: W_DATE }}>Actual End</TableCell>
-                                <TableCell sx={{ width: W_STATUS }}>Status</TableCell>
-                                <TableCell sx={{ width: W_COMM }}>Comments</TableCell>
-                                <TableCell align="right" sx={{ width: W_PACT }} />
+                                <TableCell className="sticky-col" sx={{ width: projectColW.pid }}>Project ID</TableCell>
+                                <TableCell sx={{ width: projectColW.name }}>Name</TableCell>
+                                <TableCell sx={{ width: projectColW.date }}>Planned Start</TableCell>
+                                <TableCell sx={{ width: projectColW.date }}>Planned End</TableCell>
+                                <TableCell sx={{ width: projectColW.date }}>Actual Start</TableCell>
+                                <TableCell sx={{ width: projectColW.date }}>Actual End</TableCell>   
+                                <TableCell sx={{ width: projectColW.status }}>Status</TableCell>
+                                <TableCell align="right" sx={{ width: projectColW.hours }}>Hours</TableCell>
+                                <TableCell sx={{ width: projectColW.comments }}>Comments</TableCell>
+                                <TableCell align="right" sx={{ width: projectColW.actions }} />
                               </TableRow>
                             </TableHead>
                             <TableBody>
                               {projectEntries.map(row => {
-                                const overdue = row.actual_end && row.planned_end && row.actual_end > row.planned_end;
+                                const overdue = row.emp_actual_end && row.emp_planned_end && row.emp_actual_end > row.emp_planned_end;
                                 return (
-                                  <TableRow key={row.project_id} hover>
-                                    <TableCell sx={{ width: W_PID }}>{row.project_id}</TableCell>
-                                    <TableCell sx={{ width: W_PNAME }}>
+                                  <TableRow key={row.project_id} hover selected={overdue}>
+                                    {/* Sticky first column */}
+                                    <TableCell className="sticky-col">
+                                      <Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+                                        {row.project_id}
+                                      </Typography>
+                                    </TableCell>
+
+                                    <TableCell>
                                       <Stack direction="row" alignItems="center" spacing={1}>
                                         <span>{row.project_name}</span>
                                         {overdue && <Chip size="small" label="Overdue" color="error" variant="outlined" />}
                                       </Stack>
                                     </TableCell>
-                                    <TableCell sx={{ width: W_DATE }}>
-                                      <TextField size="small" type="date" value={row.planned_start || ''}
-                                                 onChange={e => changeProj(row.project_id, 'planned_start', e.target.value)} />
+
+                                    {/* Employee planned dates (editable as before) */}
+                                    <TableCell>
+                                      <TextField
+                                        size="small" type="date" value={row.emp_planned_start || ''}
+                                        onChange={e => changeProj(row.project_id, 'emp_planned_start', e.target.value)}
+                                        className="cell-input" fullWidth
+                                      />
                                     </TableCell>
-                                    <TableCell sx={{ width: W_DATE }}>
-                                      <TextField size="small" type="date" value={row.planned_end || ''}
-                                                 onChange={e => changeProj(row.project_id, 'planned_end', e.target.value)} />
+                                    <TableCell>
+                                      <TextField
+                                        size="small" type="date" value={row.emp_planned_end || ''}
+                                        onChange={e => changeProj(row.project_id, 'emp_planned_end', e.target.value)}
+                                        className="cell-input" fullWidth
+                                      />
                                     </TableCell>
-                                    <TableCell sx={{ width: W_DATE }}>
-                                      <TextField size="small" type="date" value={row.actual_start || ''}
-                                                 onChange={e => changeProj(row.project_id, 'actual_start', e.target.value)} />
+
+                                    {/* Employee actual dates */}
+                                    <TableCell>
+                                      <TextField
+                                        size="small" type="date" value={row.emp_actual_start || ''}
+                                        onChange={e => changeProj(row.project_id, 'emp_actual_start', e.target.value)}
+                                        className="cell-input" fullWidth
+                                      />
                                     </TableCell>
-                                    <TableCell sx={{ width: W_DATE }}>
-                                      <TextField size="small" type="date" value={row.actual_end || ''}
-                                                 onChange={e => changeProj(row.project_id, 'actual_end', e.target.value)} />
+                                    <TableCell>
+                                      <TextField
+                                        size="small" type="date" value={row.emp_actual_end || ''}
+                                        onChange={e => changeProj(row.project_id, 'emp_actual_end', e.target.value)}
+                                        className="cell-input" fullWidth
+                                      />
                                     </TableCell>
-                                    <TableCell sx={{ width: W_STATUS }}>
-                                      <Select size="small" value={row.status || 'Active'}
-                                              onChange={e => changeProj(row.project_id, 'status', e.target.value)} fullWidth>
+
+                                    {/* Status */}
+                                    <TableCell>
+                                      <Select
+                                        size="small" value={row.emp_status || 'Active'}
+                                        onChange={e => changeProj(row.project_id, 'emp_status', e.target.value)}
+                                        className="cell-select" fullWidth
+                                      >
                                         <MenuItem value="Active">Active</MenuItem>
                                         <MenuItem value="On Hold">On Hold</MenuItem>
                                         <MenuItem value="Pending">Pending</MenuItem>
                                         <MenuItem value="Completed">Completed</MenuItem>
                                       </Select>
                                     </TableCell>
-                                    <TableCell sx={{ width: W_COMM }}>
-                                      <TextField size="small" value={row.comments}
-                                                 onChange={e => changeProj(row.project_id, 'comments', e.target.value)}
-                                                 placeholder="Comments" fullWidth />
+
+                                    {/* Hours */}
+                                    <TableCell align="right">
+                                      <TextField
+                                        size="small" type="number"
+                                        value={row.emp_hours}
+                                        onChange={e => changeProj(row.project_id, 'emp_hours', e.target.value)}
+                                        className="cell-input" fullWidth
+                                        inputProps={{ min: 0, step: '0.1' }}
+                                      />
                                     </TableCell>
-                                    <TableCell align="right" sx={{ width: W_PACT }}>
+
+                                    {/* Comments */}
+                                    <TableCell>
+                                      <TextField
+                                        size="small" value={row.emp_comments}
+                                        onChange={e => changeProj(row.project_id, 'emp_comments', e.target.value)}
+                                        className="cell-input" fullWidth placeholder="Comments"
+                                      />
+                                    </TableCell>
+
+                                    {/* Row actions */}
+                                    <TableCell align="right">
                                       <IconButton size="small" color="error" onClick={() => removeProj(row.project_id)}>
                                         <DeleteOutlineIcon fontSize="small" />
                                       </IconButton>

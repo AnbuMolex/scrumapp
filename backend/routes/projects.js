@@ -1,12 +1,9 @@
-// routes/projects.js
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
 const { authenticateToken, authorizeRoles } = require('../middleware/authMiddleware');
-
 const multer = require('multer');
 const XLSX = require('xlsx');
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
@@ -16,41 +13,103 @@ const upload = multer({
 const norm = (v = '') => String(v).trim();
 const lc = (v = '') => norm(v).toLowerCase();
 
+function ymd(y, m, d) {
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/**
+ * Convert any supported input to a plain 'YYYY-MM-DD' string WITHOUT timezone math.
+ */
 function toISODate(v) {
   if (v === undefined || v === null || v === '') return null;
+
+  // Excel serial numbers from XLSX
   if (typeof v === 'number') {
     const d = XLSX.SSF.parse_date_code(v);
     if (!d) return null;
-    const js = new Date(Date.UTC(d.y, d.m - 1, d.d));
-    return js.toISOString().slice(0, 10);
+    return ymd(d.y, d.m, d.d); // calendar-only, no timezone
   }
+
   const s = norm(v);
   if (!s) return null;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+
+  // Already YYYY-MM-DD -> trust it
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // Handle dd/mm/yyyy or mm/dd/yyyy (and with '-' or '.')
+  const m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);
+  if (m) {
+    const a = parseInt(m[1], 10);
+    const b = parseInt(m[2], 10);
+    const y = m[3].length === 2 ? 2000 + parseInt(m[3], 10) : parseInt(m[3], 10);
+    // Heuristic: if first part > 12, it's day-first; else assume month-first
+    const day = a > 12 ? a : b;
+    const mon = a > 12 ? b : a;
+    return ymd(y, mon, day);
+  }
+
+  // Last resort: JS Date parse, but extract LOCAL parts (no UTC conversion)
+  const dt = new Date(s);
+  if (isNaN(dt.getTime())) return null;
+  return ymd(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
+}
+
+function toNumberOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 async function upsertProject(client, data) {
   const {
     project_id, project_name, bu_id,
     planned_start_date, planned_end_date, status,
-    estimated_hours, actual_hours
+    estimated_hours, actual_hours,
+    comments, actual_start_date, actual_end_date,
   } = data;
 
+  // sanitize dates here too (idempotent if already 'YYYY-MM-DD')
+  const psd = toISODate(planned_start_date);
+  const ped = toISODate(planned_end_date);
+  const asd = toISODate(actual_start_date);
+  const aed = toISODate(actual_end_date);
+
+  // Try UPDATE first
   const upd = await client.query(
     `UPDATE projects
-     SET project_name=$1, bu_id=$2, planned_start_date=$3, planned_end_date=$4, status=$5,
-         estimated_hours=$6, actual_hours=$7
-     WHERE project_id=$8`,
-    [project_name, bu_id, planned_start_date, planned_end_date, status, estimated_hours, actual_hours, project_id]
+       SET project_name       = $1,
+           bu_id              = $2,
+           planned_start_date = $3,
+           planned_end_date   = $4,
+           status             = $5,
+           estimated_hours    = $6,
+           actual_hours       = $7,
+           comments           = $8,
+           actual_start_date  = $9,
+           actual_end_date    = $10
+     WHERE project_id = $11`,
+    [
+      project_name, bu_id, psd, ped, status,
+      estimated_hours, actual_hours, comments, asd, aed,
+      project_id,
+    ]
   );
   if (upd.rowCount > 0) return 'updated';
 
+  // Otherwise INSERT
   await client.query(
     `INSERT INTO projects
-     (project_id, project_name, bu_id, planned_start_date, planned_end_date, status, estimated_hours, actual_hours)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [project_id, project_name, bu_id, planned_start_date, planned_end_date, status, estimated_hours, actual_hours]
+       (project_id, project_name, bu_id,
+        planned_start_date, planned_end_date, status,
+        estimated_hours, actual_hours,
+        comments, actual_start_date, actual_end_date)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      project_id, project_name, bu_id,
+      psd, ped, status,
+      estimated_hours, actual_hours,
+      comments, asd, aed,
+    ]
   );
   return 'inserted';
 }
@@ -60,32 +119,48 @@ router.post('/', authenticateToken, authorizeRoles('admin'), async (req, res) =>
   const {
     projectId, projectName,
     buId,            // supported
-    businessUnit,    // also supported (your frontend uses this)
+    businessUnit,    // also supported
     plannedStartDate, plannedEndDate,
-    status, estimatedHours, actualHours
+    status, estimatedHours, actualHours,
+
+    // NEW fields (aliases supported)
+    projectComments, comments,
+    projectActualStartDate, actualStartDate,
+    projectActualEndDate,   actualEndDate,
   } = req.body;
+
+  const nextComments     = (projectComments ?? comments ?? null);
+  const nextActualStart  = (projectActualStartDate ?? actualStartDate ?? null);
+  const nextActualEnd    = (projectActualEndDate   ?? actualEndDate   ?? null);
 
   const client = await pool.connect();
   try {
-    if (!norm(projectId)) return res.status(400).json({ message: 'projectId is required' });
+    if (!norm(projectId))   return res.status(400).json({ message: 'projectId is required' });
     if (!norm(projectName)) return res.status(400).json({ message: 'projectName is required' });
 
     const buVal = norm(buId ?? businessUnit ?? '');
     if (!buVal) return res.status(400).json({ message: 'BU is required' });
 
     const result = await client.query(
-      `INSERT INTO projects (project_id, project_name, bu_id, planned_start_date, planned_end_date, status, estimated_hours, actual_hours)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO projects
+         (project_id, project_name, bu_id,
+          planned_start_date, planned_end_date, status,
+          estimated_hours, actual_hours,
+          comments, actual_start_date, actual_end_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *`,
       [
         norm(projectId),
         norm(projectName),
-        buVal, // bu_id is VARCHAR in your schema
-        plannedStartDate || null,
-        plannedEndDate || null,
+        buVal,
+        toISODate(plannedStartDate), // sanitize to date-only
+        toISODate(plannedEndDate),
         status || 'Active',
-        (estimatedHours ?? null),
-        (actualHours ?? null)
+        toNumberOrNull(estimatedHours),
+        toNumberOrNull(actualHours),
+        (nextComments !== null ? norm(nextComments) : null),
+        toISODate(nextActualStart),
+        toISODate(nextActualEnd),
       ]
     );
 
@@ -105,11 +180,20 @@ router.put('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), asyn
   const {
     newProjectId,           // optional PK change
     projectName,
-    buId,                   // supported
-    businessUnit,           // also supported
+    buId,
+    businessUnit,
     plannedStartDate, plannedEndDate,
-    status, estimatedHours, actualHours
+    status, estimatedHours, actualHours,
+
+    // NEW fields (aliases)
+    projectComments, comments,
+    projectActualStartDate, actualStartDate,
+    projectActualEndDate,   actualEndDate,
   } = req.body;
+
+  const nextComments     = (projectComments ?? comments ?? null);
+  const nextActualStart  = (projectActualStartDate ?? actualStartDate ?? null);
+  const nextActualEnd    = (projectActualEndDate   ?? actualEndDate   ?? null);
 
   const client = await pool.connect();
   try {
@@ -121,7 +205,7 @@ router.put('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), asyn
       return res.status(400).json({ message: 'Invalid project id' });
     }
 
-    // handle PK change
+    // PK change if needed
     if (targetId !== id) {
       const exists = await client.query('SELECT 1 FROM projects WHERE project_id=$1', [targetId]);
       if (exists.rowCount > 0) {
@@ -139,24 +223,30 @@ router.put('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), asyn
 
     const result = await client.query(
       `UPDATE projects 
-       SET project_name = $1,
-           bu_id = $2,
-           planned_start_date = $3,
-           planned_end_date = $4,
-           status = $5,
-           estimated_hours = $6,
-           actual_hours = $7
-       WHERE project_id = $8 
+         SET project_name       = $1,
+             bu_id              = $2,
+             planned_start_date = $3,
+             planned_end_date   = $4,
+             status             = $5,
+             estimated_hours    = $6,
+             actual_hours       = $7,
+             comments           = $8,
+             actual_start_date  = $9,
+             actual_end_date    = $10
+       WHERE project_id = $11
        RETURNING *`,
       [
         (projectName ?? null),
         nextBuId,
-        plannedStartDate || null,
-        plannedEndDate || null,
+        toISODate(plannedStartDate),  // sanitize to date-only
+        toISODate(plannedEndDate),
         status || 'Active',
-        (estimatedHours ?? null),
-        (actualHours ?? null),
-        targetId
+        toNumberOrNull(estimatedHours),
+        toNumberOrNull(actualHours),
+        (nextComments !== null ? norm(nextComments) : null),
+        toISODate(nextActualStart),
+        toISODate(nextActualEnd),
+        targetId,
       ]
     );
 
@@ -176,11 +266,10 @@ router.put('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), asyn
 // ---------------- GET (list) ----------------
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    // Return bu_id AND alias "business_unit" for your existing frontend
     const result = await pool.query(
       `SELECT p.*, p.bu_id AS business_unit
-       FROM projects p
-       ORDER BY p.project_name`
+         FROM projects p
+        ORDER BY p.project_name`
     );
     res.json(result.rows);
   } catch (err) {
@@ -194,16 +283,13 @@ router.delete('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), a
   const { id } = req.params;
   try {
     await pool.query('DELETE FROM daily_entry_project_utilization WHERE project_id = $1', [id]);
-
     const result = await pool.query('DELETE FROM projects WHERE project_id = $1 RETURNING *', [id]);
     if (result.rowCount === 0) return res.status(404).json({ message: 'Project not found' });
-
     res.json({ message: 'Project deleted successfully.' });
   } catch (error) {
-    // FK violation (no cascade)
     if (error.code === '23503') {
       return res.status(409).json({
-        message: 'Cannot delete: project is still referenced by daily entries. Remove usages first or enable ON DELETE CASCADE.'
+        message: 'Cannot delete: project is still referenced by daily entries. Remove usages first or enable ON DELETE CASCADE.',
       });
     }
     console.error('Error deleting project:', error);
@@ -211,7 +297,7 @@ router.delete('/:id', authenticateToken, authorizeRoles('admin', 'team_lead'), a
   }
 });
 
-// ---------------- Import (xlsx/csv) — optional but kept for your UI ----------------
+// ---------------- Import (xlsx/csv) ----------------
 router.post('/import', authenticateToken, authorizeRoles('admin'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'No file uploaded.' });
 
@@ -234,6 +320,15 @@ router.post('/import', authenticateToken, authorizeRoles('admin'), upload.single
       status: headerRow.findIndex(h => ['status'].includes(h)),
       estimated_hours: headerRow.findIndex(h => ['est. hrs','est hrs','estimated hours','estimated_hours'].includes(h)),
       actual_hours: headerRow.findIndex(h => ['act. hrs','act hrs','actual hours','actual_hours'].includes(h)),
+
+      // NEW optional columns aligned to your table
+      comments: headerRow.findIndex(h => ['comments','comment','project comments','project_comments','remarks','notes'].includes(h)),
+      actual_start_date: headerRow.findIndex(h => [
+        'actual start','actual_start','actual start date','actual_start_date'
+      ].includes(h)),
+      actual_end_date: headerRow.findIndex(h => [
+        'actual end','actual_end','actual end date','actual_end_date'
+      ].includes(h)),
     };
 
     if (map.project_id === -1 || map.project_name === -1 || map.bu === -1) {
@@ -246,27 +341,31 @@ router.post('/import', authenticateToken, authorizeRoles('admin'), upload.single
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (!row || row.length === 0) continue;
 
         const project_id = norm(row[map.project_id]);
         const project_name = norm(row[map.project_name]);
-        const bu_id = norm(row[map.bu]); // must be bu_id value
+        const bu_id = norm(row[map.bu]);
 
         if (!project_id || !project_name || !bu_id) { skipped++; continue; }
 
         const planned_start_date = map.planned_start_date !== -1 ? toISODate(row[map.planned_start_date]) : null;
         const planned_end_date   = map.planned_end_date   !== -1 ? toISODate(row[map.planned_end_date])   : null;
         const status             = map.status !== -1 ? norm(row[map.status] || 'Active') : 'Active';
-        const estimated_hours    = map.estimated_hours !== -1 && row[map.estimated_hours] !== '' ? Number(row[map.estimated_hours]) : null;
-        const actual_hours       = map.actual_hours    !== -1 && row[map.actual_hours]    !== '' ? Number(row[map.actual_hours])    : null;
+        const estimated_hours    = map.estimated_hours !== -1 ? toNumberOrNull(row[map.estimated_hours]) : null;
+        const actual_hours       = map.actual_hours    !== -1 ? toNumberOrNull(row[map.actual_hours])    : null;
+
+        const comments           = map.comments          !== -1 ? (norm(row[map.comments]) || null)     : null;
+        const actual_start_date  = map.actual_start_date !== -1 ? toISODate(row[map.actual_start_date]) : null;
+        const actual_end_date    = map.actual_end_date   !== -1 ? toISODate(row[map.actual_end_date])   : null;
 
         try {
           const resUp = await upsertProject(client, {
             project_id, project_name, bu_id,
-            planned_start_date, planned_end_date, status, estimated_hours, actual_hours
+            planned_start_date, planned_end_date, status, estimated_hours, actual_hours,
+            comments, actual_start_date, actual_end_date,
           });
           if (resUp === 'inserted') inserted++; else updated++;
         } catch (e) {
