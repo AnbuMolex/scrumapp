@@ -5,16 +5,11 @@ const pool = require('../db/pool');
 const { authenticateToken } = require('../middleware/authMiddleware');
 
 /**
- * Schema expectations:
- * - daily_entry_utilization: utilization_id (PK), employee_id, entry_date (DATE),
- *   activity, utilization_hours, utilization_comments
- * - daily_entry_project_utilization: depu_id (PK), employee_id, project_id, entry_date (DATE),
- *   project_name, employee_project_start_date, employee_project_end_date, employee_project_status,
- *   employee_project_hours, employee_project_comments, employee_planned_start_date, employee_planned_end_date
- *   UNIQUE (employee_id, project_id, entry_date)
+ * Tables:
+ * - daily_entry_utilization(entry_date DATE)
+ * - daily_entry_project_utilization(entry_date DATE)  UNIQUE(employee_id, project_id, entry_date)
  */
 
-// ---------- helpers ----------
 const norm = (v = '') => String(v).trim();
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === '';
 
@@ -24,7 +19,6 @@ function parseHours(v) {
   if (!Number.isFinite(n)) throw Object.assign(new Error('hours must be a number'), { status: 400 });
   return n;
 }
-
 function ensureNonNegativeHours(val) {
   if (!Number.isFinite(val) || val < 0) {
     const err = new Error('hours must be a non-negative number');
@@ -33,8 +27,6 @@ function ensureNonNegativeHours(val) {
   }
   return val;
 }
-
-// Strict YYYY-MM-DD check; keeps it as DATE (no TZ shifts)
 function assertDateString(yyyy_mm_dd, label = 'date') {
   if (isBlank(yyyy_mm_dd)) {
     const err = new Error(`${label} is required`);
@@ -48,20 +40,17 @@ function assertDateString(yyyy_mm_dd, label = 'date') {
   }
   return String(yyyy_mm_dd);
 }
-
-// Accept date from body.entryDate OR query.date OR params.date (in that order)
-function getEntryDate(req, label = 'entryDate') {
-  const d = req.body?.entryDate ?? req.query?.date ?? req.params?.date;
-  return assertDateString(d, label);
+// Local "today" as YYYY-MM-DD in Asia/Kolkata (no UTC drift)
+function todayYMDLocal() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 }
 
+// ONLY compare strings (YYYY-MM-DD); never construct Date objects
 function validateDateWindow(start, end, label = 'date range') {
   if (!isBlank(start) && !isBlank(end)) {
     assertDateString(start, `${label} start`);
     assertDateString(end, `${label} end`);
-    const s = new Date(start + 'T00:00:00');
-    const e = new Date(end + 'T00:00:00');
-    if (s > e) {
+    if (start > end) {
       const err = new Error(`${label}: start cannot be after end`);
       err.status = 400;
       throw err;
@@ -69,11 +58,16 @@ function validateDateWindow(start, end, label = 'date range') {
   }
 }
 
+// Accept date from body.entryDate OR query.date OR params.date (in that order)
+function getEntryDate(req, label = 'entryDate') {
+  const d = req.body?.entryDate ?? req.query?.date ?? req.params?.date;
+  return assertDateString(d, label);
+}
+
 /* =============================================================================
    UTILIZATION (per-day, non-project)
 ============================================================================= */
 
-// GET utilization rows for a specific employee+date (array)
 router.get('/daily-entries/:employeeId/:date', authenticateToken, async (req, res) => {
   const { employeeId, date } = req.params;
   try {
@@ -144,7 +138,6 @@ router.post('/daily-entries', authenticateToken, async (req, res) => {
   }
 });
 
-// Optional update single utilization row
 router.put('/daily-entries/:employeeId/:date/:utilizationId', authenticateToken, async (req, res) => {
   const { employeeId, date, utilizationId } = req.params;
   const { activity, hours, comments } = req.body;
@@ -176,7 +169,6 @@ router.put('/daily-entries/:employeeId/:date/:utilizationId', authenticateToken,
   }
 });
 
-// DELETE a single utilization row for the day
 router.delete('/daily-entries/:employeeId/:date/:utilizationId', authenticateToken, async (req, res) => {
   const { employeeId, date, utilizationId } = req.params;
   try {
@@ -195,19 +187,18 @@ router.delete('/daily-entries/:employeeId/:date/:utilizationId', authenticateTok
 });
 
 /* =============================================================================
-   EMPLOYEE ↔ PROJECT (per-day rows)
-   Accept date like utilization (path :date), and also support ?date= or body.entryDate
+   PROJECT (per-day rows)
 ============================================================================= */
 
-// Common SELECT (current + carry-forward) wrapped to allow ORDER BY after UNION ALL
+// Carry-forward: latest prior row (any gap) while status != 'Completed'
 async function fetchEmployeeProjectsForDate(employeeId, day, status) {
   const params = [employeeId, day];
-  let statusFilterCurrent = '';
-  let statusFilterPrev = '';
+  let statusCurrent = '';
+  let statusCarry = '';
   if (!isBlank(status)) {
     params.push(status);
-    statusFilterCurrent = ` AND depu.employee_project_status = $3`;
-    statusFilterPrev    = ` AND depu_prev.employee_project_status = $3`;
+    statusCurrent = ` AND depu.employee_project_status = $3`;
+    statusCarry   = ` AND lp.employee_project_status = $3`;
   }
 
   const { rows } = await pool.query(
@@ -231,35 +222,43 @@ async function fetchEmployeeProjectsForDate(employeeId, day, status) {
       LEFT JOIN projects p ON p.project_id = depu.project_id
       WHERE depu.employee_id = $1
         AND depu.entry_date  = $2::date
-        ${statusFilterCurrent}
+        ${statusCurrent}
+    ),
+    last_prior AS (
+      SELECT DISTINCT ON (d.project_id)
+        d.*
+      FROM daily_entry_project_utilization d
+      WHERE d.employee_id = $1
+        AND d.entry_date  < $2::date
+      ORDER BY d.project_id, d.entry_date DESC
     ),
     carry_rows AS (
-  SELECT
-    NULL::bigint                       AS depu_id,
-    depu_prev.project_id               AS project_id,
-    COALESCE(depu_prev.project_name, p.project_name) AS project_name,
-    depu_prev.employee_planned_start_date,
-    depu_prev.employee_planned_end_date,
-    depu_prev.employee_project_start_date,  -- carry actual start
-    depu_prev.employee_project_end_date,    -- << carry actual end (changed from NULL)
-    depu_prev.employee_project_status  AS employee_project_status,
-    NULL::numeric                      AS employee_project_hours,      -- blank for the new day
-    NULL::text                         AS employee_project_comments,   -- blank for the new day
-    p.planned_start_date               AS project_planned_start_date,
-    p.planned_end_date                 AS project_planned_end_date,
-    $2::date                           AS entry_date
-  FROM daily_entry_project_utilization depu_prev
-  LEFT JOIN projects p ON p.project_id = depu_prev.project_id
-  WHERE depu_prev.employee_id = $1
-    AND depu_prev.entry_date = ($2::date - INTERVAL '1 day')::date
-    AND depu_prev.employee_project_status = 'Active'
-    AND NOT EXISTS (
-      SELECT 1 FROM daily_entry_project_utilization depu_today
-      WHERE depu_today.employee_id = $1
-        AND depu_today.project_id  = depu_prev.project_id
-        AND depu_today.entry_date  = $2::date
+      SELECT
+        NULL::bigint AS depu_id,
+        lp.project_id,
+        COALESCE(lp.project_name, p.project_name) AS project_name,
+        lp.employee_planned_start_date,
+        lp.employee_planned_end_date,
+        lp.employee_project_start_date,
+        lp.employee_project_end_date,
+        lp.employee_project_status,
+        NULL::numeric AS employee_project_hours,
+        NULL::text    AS employee_project_comments,
+        p.planned_start_date  AS project_planned_start_date,
+        p.planned_end_date    AS project_planned_end_date,
+        $2::date AS entry_date
+      FROM last_prior lp
+      LEFT JOIN projects p ON p.project_id = lp.project_id
+      WHERE lp.employee_project_status <> 'Completed'
+        ${statusCarry}
+        AND NOT EXISTS (
+          SELECT 1
+            FROM daily_entry_project_utilization t
+           WHERE t.employee_id = $1
+             AND t.project_id  = lp.project_id
+             AND t.entry_date  = $2::date
+        )
     )
-)
     SELECT *
     FROM (
       SELECT * FROM current_rows
@@ -274,16 +273,15 @@ async function fetchEmployeeProjectsForDate(employeeId, day, status) {
   return rows;
 }
 
-// ---- GET projects (accept :date and/or ?date=)
 const getProjectsHandler = async (req, res) => {
   const { employeeId } = req.params;
   const { status } = req.query;
   try {
-    let d =
-    req.body?.entryDate ||
-    req.query?.date ||
-    req.params?.date ||
-    new Date().toISOString().slice(0, 10); // fallback to today
+    const d =
+      req.body?.entryDate ||
+      req.query?.date ||
+      req.params?.date ||
+      todayYMDLocal(); // fallback only if nothing provided
     const day = assertDateString(d, 'date');
     const rows = await fetchEmployeeProjectsForDate(employeeId, day, status);
     res.json(rows);
@@ -295,7 +293,6 @@ const getProjectsHandler = async (req, res) => {
 router.get('/employee/:employeeId/projects', authenticateToken, getProjectsHandler);
 router.get('/employee/:employeeId/projects/:date', authenticateToken, getProjectsHandler);
 
-// ---- POST upsert one project row (accept :date and/or body/query)
 const postProjectHandler = async (req, res) => {
   const { employeeId } = req.params;
   const {
@@ -329,7 +326,7 @@ const postProjectHandler = async (req, res) => {
             employee_project_start_date, employee_project_end_date,
             employee_project_status, employee_project_hours, employee_project_comments,
             employee_planned_start_date, employee_planned_end_date)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11)
          ON CONFLICT (employee_id, project_id, entry_date)
          DO UPDATE SET
            project_name                = COALESCE(EXCLUDED.project_name,                daily_entry_project_utilization.project_name),
@@ -355,7 +352,6 @@ const postProjectHandler = async (req, res) => {
         ]
       );
 
-      // Recompute projects.actual_start_date as earliest non-null employee actual start
       await client.query(
         `UPDATE projects p
             SET actual_start_date = sub.min_actual_start
@@ -376,6 +372,7 @@ const postProjectHandler = async (req, res) => {
       console.error('UPSERT employee project utilization error:', err);
       if (err.code === '23503') return res.status(400).json({ message: 'employeeId or projectId does not exist.' });
       if (err.code === '23514') return res.status(400).json({ message: 'Constraint failed for project utilization row.' });
+      if (err.code === '23505') return res.status(400).json({ message: 'Uniqueness violation (employee, project, date).' });
       res.status(500).json({ message: 'Failed to save employee project.' });
     } finally {
       client.release();
@@ -387,7 +384,6 @@ const postProjectHandler = async (req, res) => {
 router.post('/employee/:employeeId/projects', authenticateToken, postProjectHandler);
 router.post('/employee/:employeeId/projects/:date', authenticateToken, postProjectHandler);
 
-// ---- PUT update one project row (accept :date and/or body/query)
 const putProjectHandler = async (req, res) => {
   const { employeeId, projectId } = req.params;
   const { projectName, startDate, endDate, status, hours, comments, plannedStart, plannedEnd } = req.body;
@@ -422,7 +418,7 @@ const putProjectHandler = async (req, res) => {
       const { rowCount } = await client.query(
         `UPDATE daily_entry_project_utilization
             SET ${sets.join(', ')}
-          WHERE employee_id = $${i++} AND project_id = $${i++} AND entry_date = $${i++}`,
+          WHERE employee_id = $${i++} AND project_id = $${i++} AND entry_date = $${i++}::date`,
         params
       );
       if (!rowCount) {
@@ -460,7 +456,6 @@ const putProjectHandler = async (req, res) => {
 router.put('/employee/:employeeId/projects/:projectId', authenticateToken, putProjectHandler);
 router.put('/employee/:employeeId/projects/:projectId/:date', authenticateToken, putProjectHandler);
 
-// ---- DELETE one project row for a specific entry date (accept :date and/or ?date=)
 const deleteProjectHandler = async (req, res) => {
   const { employeeId, projectId } = req.params;
   try {
@@ -494,5 +489,133 @@ const deleteProjectHandler = async (req, res) => {
 };
 router.delete('/employee/:employeeId/projects/:projectId', authenticateToken, deleteProjectHandler);
 router.delete('/employee/:employeeId/projects/:projectId/:date', authenticateToken, deleteProjectHandler);
+
+/* =============================================================================
+   REPORTING
+============================================================================= */
+
+router.get('/employee/:employeeId/range', authenticateToken, async (req, res) => {
+  const { employeeId } = req.params;
+  const { startDate, endDate } = req.query;
+  try {
+    const s = assertDateString(startDate, 'startDate');
+    const e = assertDateString(endDate, 'endDate');
+
+    const utilQ = await pool.query(
+      `SELECT entry_date, activity, utilization_hours, utilization_comments
+         FROM daily_entry_utilization
+        WHERE employee_id = $1
+          AND entry_date BETWEEN $2::date AND $3::date
+        ORDER BY entry_date, activity`,
+      [employeeId, s, e]
+    );
+    const activities = utilQ.rows.map(r => ({
+      report_date: r.entry_date,
+      activity_type: r.activity,
+      hours: Number(r.utilization_hours) || 0,
+      comment: r.utilization_comments ?? null,
+    }));
+
+    const projQ = await pool.query(
+      `SELECT
+          depu.entry_date,
+          depu.project_id,
+          COALESCE(depu.project_name, p.project_name) AS project_name,
+          depu.employee_project_hours,
+          depu.employee_project_comments,
+          depu.employee_project_status
+        FROM daily_entry_project_utilization depu
+        LEFT JOIN projects p ON p.project_id = depu.project_id
+       WHERE depu.employee_id = $1
+         AND depu.entry_date BETWEEN $2::date AND $3::date
+       ORDER BY depu.entry_date, COALESCE(depu.project_name, p.project_name)`,
+      [employeeId, s, e]
+    );
+    const projectEntries = projQ.rows.map(r => ({
+      report_date: r.entry_date,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      employee_project_hours: Number(r.employee_project_hours) || 0,
+      employee_project_comments: r.employee_project_comments ?? null,
+      employee_project_status: r.employee_project_status ?? 'Active',
+    }));
+
+    res.json({ activities, projectEntries, assignments: [] });
+  } catch (err) {
+    console.error('GET /employee/:employeeId/range error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to build range report.' });
+  }
+});
+
+router.get('/team/:teamId/utilization-summary', authenticateToken, async (req, res) => {
+  const { teamId } = req.params;
+  const { startDate, endDate } = req.query;
+
+  try {
+    const s = assertDateString(startDate, 'startDate');
+    const e = assertDateString(endDate, 'endDate');
+
+    const { rows } = await pool.query(
+      `
+      WITH emp AS (
+        SELECT e.employee_id, e.first_name, e.last_name
+        FROM employees e
+        WHERE e.team_id = $1
+      ),
+      u AS (
+        SELECT
+          du.employee_id,
+          SUM(CASE WHEN lower(du.activity) = 'supervision'         THEN du.utilization_hours ELSE 0 END) AS s,
+          SUM(CASE WHEN lower(du.activity) = 'correlation'         THEN du.utilization_hours ELSE 0 END) AS c,
+          SUM(CASE WHEN lower(du.activity) = 'method development'  THEN du.utilization_hours ELSE 0 END) AS m,
+          SUM(CASE WHEN lower(du.activity) = 'application'         THEN du.utilization_hours ELSE 0 END) AS a,
+          SUM(CASE WHEN lower(du.activity) = 'cpm'                 THEN du.utilization_hours ELSE 0 END) AS cp,
+          SUM(CASE WHEN lower(du.activity) = 'meeting'             THEN du.utilization_hours ELSE 0 END) AS o,
+          SUM(CASE WHEN lower(du.activity) = 'trainer'             THEN du.utilization_hours ELSE 0 END) AS t1,
+          SUM(CASE WHEN lower(du.activity) = 'trainee'             THEN du.utilization_hours ELSE 0 END) AS t2,
+          SUM(CASE WHEN lower(du.activity) = 'misc'                THEN du.utilization_hours ELSE 0 END) AS na,
+          SUM(CASE WHEN lower(du.activity) = 'leave'               THEN du.utilization_hours ELSE 0 END) AS l,
+          SUM(CASE WHEN lower(du.activity) = 'software'            THEN du.utilization_hours ELSE 0 END) AS sw
+        FROM daily_entry_utilization du
+        WHERE du.entry_date BETWEEN $2::date AND $3::date
+        GROUP BY du.employee_id
+      ),
+      p AS (
+        SELECT
+          depu.employee_id,
+          SUM(COALESCE(depu.employee_project_hours,0)) AS p
+        FROM daily_entry_project_utilization depu
+        WHERE depu.entry_date BETWEEN $2::date AND $3::date
+        GROUP BY depu.employee_id
+      )
+      SELECT
+        emp.employee_id,
+        (emp.first_name || ' ' || emp.last_name) AS name,
+        COALESCE(u.s,0)  AS "S",
+        COALESCE(p.p,0)  AS "P",
+        COALESCE(u.c,0)  AS "C",
+        COALESCE(u.m,0)  AS "M",
+        COALESCE(u.a,0)  AS "A",
+        COALESCE(u.cp,0) AS "CP",
+        COALESCE(u.o,0)  AS "O",
+        COALESCE(u.t1,0) AS "T1",
+        COALESCE(u.t2,0) AS "T2",
+        COALESCE(u.na,0) AS "NA",
+        COALESCE(u.l,0)  AS "L",
+        COALESCE(u.sw,0) AS "SW"
+      FROM emp
+      LEFT JOIN u ON u.employee_id = emp.employee_id
+      LEFT JOIN p ON p.employee_id = emp.employee_id
+      ORDER BY name;
+      `,
+      [teamId, s, e]
+    );
+
+    res.json({ rows });
+  } catch (err) {
+    console.error('GET /team/:teamId/utilization-summary error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to build team utilization summary.' });
+  }
+});
 
 module.exports = router;

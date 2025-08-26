@@ -20,6 +20,7 @@ const statusChip = (status) => {
   if (s === 'completed') return { label: 'Completed', color: 'primary' };
   if (s === 'on hold') return { label: 'On Hold', color: 'warning' };
   if (s === 'cancelled') return { label: 'Cancelled', color: 'error' };
+  if (s === 'Waiting for Approval') return { label: 'Waiting for Approval', color: 'warning' };
   return { label: status || '—', color: 'default' };
 };
 

@@ -1,3 +1,4 @@
+// App.js
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   BrowserRouter as Router,
@@ -20,7 +21,7 @@ import TeamScrumReport from './components/TeamScrumReport';
 import AdminSettings from './components/AdminSettings';
 import Dashboard from './components/Dashboard';
 
-// MUI
+// ---------------- MUI ----------------
 import {
   ThemeProvider,
   createTheme,
@@ -36,9 +37,21 @@ import {
   Alert,
   CircularProgress,
   Divider,
+  Avatar,
+  IconButton,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  InputAdornment,
+  TextField,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from '@mui/material';
 
-// Icons
+// ---------------- Icons ----------------
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import TodayIcon from '@mui/icons-material/Today';
 import AssessmentIcon from '@mui/icons-material/Assessment';
@@ -47,6 +60,10 @@ import WorkIcon from '@mui/icons-material/Work';
 import PersonAddAltIcon from '@mui/icons-material/PersonAddAlt';
 import SettingsIcon from '@mui/icons-material/Settings';
 import LogoutIcon from '@mui/icons-material/Logout';
+import LockResetIcon from '@mui/icons-material/LockReset';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 
 // ---------------- Small helpers ----------------
 const decodeJWT = (token) => {
@@ -101,11 +118,113 @@ if (savedToken) {
   axios.defaults.headers.common['Authorization'] = `Bearer ${savedToken}`;
 }
 
+// ---------------- Change Password Dialog ----------------
+const ChangePasswordDialog = ({ open, onClose, onSuccess }) => {
+  const [currentPassword, setCurrentPassword] = React.useState('');
+  const [newPassword, setNewPassword] = React.useState('');
+  const [showCurrent, setShowCurrent] = React.useState(false);
+  const [showNew, setShowNew] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const { showModal } = useModal();
+
+  const reset = () => {
+    setCurrentPassword('');
+    setNewPassword('');
+    setShowCurrent(false);
+    setShowNew(false);
+  };
+
+  const handleSubmit = async () => {
+    if (!currentPassword.trim()) {
+      showModal('Please enter your current password.');
+      return;
+    }
+    if (!newPassword.trim() || newPassword.length < 8) {
+      showModal('New password must be at least 8 characters.');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      // Adjust the endpoint to your backend route if different
+      await axios.post('/api/auth/change-password', {
+        currentPassword,
+        newPassword,
+      });
+      showModal('Password changed successfully. Please log in again.');
+      reset();
+      onClose();
+      onSuccess?.(); // e.g., force logout
+    } catch (e) {
+      // Global interceptor will surface message if present; fallback here:
+      if (!e.response?.data?.message) showModal('Failed to change password.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={() => { reset(); onClose(); }} maxWidth="xs" fullWidth>
+      <DialogTitle>Change password</DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <TextField
+            label="Current password"
+            type={showCurrent ? 'text' : 'password'}
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            fullWidth
+            autoFocus
+            InputProps={{
+              endAdornment: (
+                <InputAdornment position="end">
+                  <IconButton onClick={() => setShowCurrent((v) => !v)} edge="end">
+                    {showCurrent ? <VisibilityOff /> : <Visibility />}
+                  </IconButton>
+                </InputAdornment>
+              ),
+            }}
+          />
+          <TextField
+            label="New password"
+            type={showNew ? 'text' : 'password'}
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            helperText="Minimum 8 characters"
+            fullWidth
+            InputProps={{
+              endAdornment: (
+                <InputAdornment position="end">
+                  <IconButton onClick={() => setShowNew((v) => !v)} edge="end">
+                    {showNew ? <VisibilityOff /> : <Visibility />}
+                  </IconButton>
+                </InputAdornment>
+              ),
+            }}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => { reset(); onClose(); }} disabled={submitting}>
+          Cancel
+        </Button>
+        <Button onClick={handleSubmit} variant="contained" disabled={submitting}>
+          {submitting ? 'Saving…' : 'Change password'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
 // ---------------- Navbar ----------------
 const Navbar = ({ user, onLogout }) => {
   const isAdmin = user.role === 'admin';
   const isTeamLead = user.role === 'team_lead';
-  const location = useLocation();
+
+  const [menuEl, setMenuEl] = React.useState(null);
+  const [pwdOpen, setPwdOpen] = React.useState(false);
+
+  const openMenu = (e) => setMenuEl(e.currentTarget);
+  const closeMenu = () => setMenuEl(null);
 
   const linkStyle = ({ isActive }) => ({
     textTransform: 'none',
@@ -116,127 +235,161 @@ const Navbar = ({ user, onLogout }) => {
       ? { backgroundColor: 'rgba(255,255,255,0.18)' }
       : { backgroundColor: 'transparent' }),
   });
-  <Button
-  component={NavLink}
-  to="/dashboard"
-  color="inherit"             // <-- inherits white from AppBar
-  sx={linkStyle}
-  startIcon={<DashboardIcon />}
-/>
+
   return (
-    <AppBar
-      position="sticky"
-      elevation={3}
-      sx={{
-        background:
-          'linear-gradient(90deg, rgba(30,136,229,0.95) 0%, rgba(123,31,162,0.95) 100%)',
-        color: 'common.white',
-      }}
-    >
-      <Toolbar sx={{ gap: 2 }}>
-        {/* Brand (hamburger removed) */}
-        <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.5, mr: 1 }}>
-          GES SCRUM
-        </Typography>
+    <>
+      <AppBar
+        position="sticky"
+        elevation={3}
+        sx={{
+          background:
+            'linear-gradient(90deg, rgba(30,136,229,0.95) 0%, rgba(123,31,162,0.95) 100%)',
+          color: 'common.white',
+        }}
+      >
+        <Toolbar sx={{ gap: 2 }}>
+          {/* Brand */}
+          <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.5, mr: 1 }}>
+            GES SCRUM
+          </Typography>
 
-        <Divider
-          orientation="vertical"
-          flexItem
-          sx={{ borderColor: 'rgba(255,255,255,0.25)', mr: 1 }}
-        />
+          <Divider
+            orientation="vertical"
+            flexItem
+            sx={{ borderColor: 'rgba(255,255,255,0.25)', mr: 1 }}
+          />
 
-        <Stack direction="row" spacing={1} sx={{ flexGrow: 1 }}>
-          <Button
-            component={NavLink}
-            to="/dashboard"
-            color="inherit"
-            sx={linkStyle}
-            startIcon={<DashboardIcon />}
-          >
-            Dashboard
-          </Button>
-
-          <Button
-            component={NavLink}
-            to="/daily-entry"
-            color="inherit"
-            sx={linkStyle}
-            startIcon={<TodayIcon />}
-          >
-            Daily Entry
-          </Button>
-
-          {(isAdmin || isTeamLead) && (
+          <Stack direction="row" spacing={1} sx={{ flexGrow: 1 }}>
             <Button
               component={NavLink}
-              to="/team-reports"
+              to="/dashboard"
               color="inherit"
               sx={linkStyle}
-              startIcon={<AssessmentIcon />}
+              startIcon={<DashboardIcon />}
             >
-              Team Reports
+              Dashboard
             </Button>
-          )}
 
-          {isAdmin && (
-            <>
-              <Button
-                component={NavLink}
-                to="/admin-settings"
-                color="inherit"
-                sx={linkStyle}
-                startIcon={<SettingsIcon />}
-              >
-                Settings
-              </Button>
-              <Button
-                component={NavLink}
-                to="/manage-teams"
-                color="inherit"
-                sx={linkStyle}
-                startIcon={<GroupIcon />}
-              >
-                Manage Teams
-              </Button>
-              <Button
-                component={NavLink}
-                to="/manage-projects"
-                color="inherit"
-                sx={linkStyle}
-                startIcon={<WorkIcon />}
-              >
-                Manage Projects
-              </Button>
-              <Button
-                component={NavLink}
-                to="/register"
-                color="inherit"
-                sx={linkStyle}
-                startIcon={<PersonAddAltIcon />}
-              >
-                Register
-              </Button>
-            </>
-          )}
-        </Stack>
+            <Button
+              component={NavLink}
+              to="/daily-entry"
+              color="inherit"
+              sx={linkStyle}
+              startIcon={<TodayIcon />}
+            >
+              Daily Entry
+            </Button>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Tooltip title={user.email || ''}>
-            <Typography variant="body2" sx={{ display: { xs: 'none', sm: 'block' } }}>
-              Hello, {user.first_name}
-            </Typography>
-          </Tooltip>
-          <Button
-            color="inherit"
-            onClick={onLogout}
-            startIcon={<LogoutIcon />}
-            sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 10 }}
-          >
-            Logout
-          </Button>
-        </Box>
-      </Toolbar>
-    </AppBar>
+            {(isAdmin || isTeamLead) && (
+              <Button
+                component={NavLink}
+                to="/team-reports"
+                color="inherit"
+                sx={linkStyle}
+                startIcon={<AssessmentIcon />}
+              >
+                Team Reports
+              </Button>
+            )}
+
+            {isAdmin && (
+              <>
+                <Button
+                  component={NavLink}
+                  to="/admin-settings"
+                  color="inherit"
+                  sx={linkStyle}
+                  startIcon={<SettingsIcon />}
+                >
+                  Settings
+                </Button>
+                <Button
+                  component={NavLink}
+                  to="/manage-teams"
+                  color="inherit"
+                  sx={linkStyle}
+                  startIcon={<GroupIcon />}
+                >
+                  Manage Teams
+                </Button>
+                <Button
+                  component={NavLink}
+                  to="/manage-projects"
+                  color="inherit"
+                  sx={linkStyle}
+                  startIcon={<WorkIcon />}
+                >
+                  Manage Projects
+                </Button>
+                <Button
+                  component={NavLink}
+                  to="/register"
+                  color="inherit"
+                  sx={linkStyle}
+                  startIcon={<PersonAddAltIcon />}
+                >
+                  Register
+                </Button>
+              </>
+            )}
+          </Stack>
+
+          {/* User menu */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Tooltip title={user.email || ''}>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <Typography variant="body2" sx={{ display: { xs: 'none', sm: 'block' } }}>
+                  Hello, {user.first_name}
+                </Typography>
+                <IconButton
+                  onClick={openMenu}
+                  size="small"
+                  sx={{ ml: 1, color: 'inherit' }}
+                  aria-controls={menuEl ? 'user-menu' : undefined}
+                  aria-haspopup="true"
+                  aria-expanded={!!menuEl}
+                >
+                  <Avatar sx={{ width: 32, height: 32 }}>
+                    <AccountCircleIcon />
+                  </Avatar>
+                </IconButton>
+              </Stack>
+            </Tooltip>
+
+            <Menu
+              id="user-menu"
+              anchorEl={menuEl}
+              open={!!menuEl}
+              onClose={closeMenu}
+              onClick={closeMenu}
+              transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+              anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+            >
+              <MenuItem onClick={() => setPwdOpen(true)}>
+                <ListItemIcon>
+                  <LockResetIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Change password</ListItemText>
+              </MenuItem>
+              <Divider />
+              <MenuItem onClick={onLogout}>
+                <ListItemIcon>
+                  <LogoutIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Logout</ListItemText>
+              </MenuItem>
+            </Menu>
+          </Box>
+        </Toolbar>
+      </AppBar>
+
+      {/* Password dialog */}
+      <ChangePasswordDialog
+        open={pwdOpen}
+        onClose={() => setPwdOpen(false)}
+        onSuccess={onLogout} // force re-login after password change
+      />
+    </>
   );
 };
 
@@ -487,15 +640,9 @@ const theme = createTheme({
     button: { fontWeight: 700 },
   },
   components: {
-    MuiButton: {
-      styleOverrides: { root: { borderRadius: 10 } },
-    },
-    MuiAppBar: {
-      defaultProps: { elevation: 3 },
-    },
-    MuiContainer: {
-      defaultProps: { maxWidth: 'xl' },
-    },
+    MuiButton: { styleOverrides: { root: { borderRadius: 10 } } },
+    MuiAppBar: { defaultProps: { elevation: 3 } },
+    MuiContainer: { defaultProps: { maxWidth: 'xl' } },
   },
 });
 
@@ -511,5 +658,8 @@ const AppShell = () => (
     </ThemeProvider>
   </Router>
 );
+
+//const requestLogger = require('./middleware/requestLogger');
+//app.use(requestLogger);
 
 export default AppShell;
