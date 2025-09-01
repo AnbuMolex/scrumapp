@@ -145,7 +145,10 @@ app.locals.withTransaction = withTransaction;
 app.use('/api/teams', teamsRouter);
 app.use('/api/employees', employeesRouter);
 app.use('/api/projects', projectsRouter);
-
+//test
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date() });
+});
 // ✅ single mount for merged daily routes
 // This exposes both sets of endpoints from one file:
 //   /api/daily-entries/...            (non-project daily utilization)

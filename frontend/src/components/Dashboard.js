@@ -72,13 +72,24 @@ function Dashboard({ user }) {
   const [loadingEmp, setLoadingEmp] = useState(false);
   const [loadingHours, setLoadingHours] = useState(false);
 
+  // === Time helpers (IST) ===
+  const ymdIST = (d) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+
+  const parseISO = (s) => {
+    const [y, m, d] = s.split('-').map(Number);
+    // Construct at local midnight; we only need the Y-M-D parts for rendering labels
+    return new Date(y, m - 1, d);
+  };
+
   // date range (current month by default)
   const today = useMemo(() => new Date(), []);
   const [fromDate, setFromDate] = useState(() => {
-    const d = new Date(); d.setDate(1);
-    return d.toISOString().slice(0, 10);
+    const d = new Date();
+    d.setDate(1);
+    return ymdIST(d);
   });
-  const [toDate, setToDate] = useState(() => today.toISOString().slice(0, 10));
+  const [toDate, setToDate] = useState(() => ymdIST(today)); // today in IST
 
   // KPI map per employee (selected team)
   const [empKpi, setEmpKpi] = useState({});
@@ -116,32 +127,15 @@ function Dashboard({ user }) {
     headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
   });
 
-  // Helpers
-  const toISO = (d) => d.toISOString().slice(0, 10);
-  const parseISO = (s) => {
-    const [y, m, d] = s.split('-').map(Number);
-    return new Date(y, m - 1, d);
-  };
-  const eachDate = (startISO, endISO) => {
-    const out = [];
-    let d = parseISO(startISO);
-    const end = parseISO(endISO);
-    while (d <= end) {
-      out.push(toISO(d));
-      d.setDate(d.getDate() + 1);
-    }
-    return out;
-  };
-
   const last8Days = useMemo(() => {
     const arr = [];
-    const d = new Date(today);
+    const base = new Date(today);
     for (let i = 0; i < 8; i++) {
-      const dd = new Date(d);
-      dd.setDate(d.getDate() - i);
-      arr.push(toISO(dd));
+      const dd = new Date(base);
+      dd.setDate(base.getDate() - i);
+      arr.push(ymdIST(dd)); // IST-aligned
     }
-    return arr; // [today, -1, -2, ... -7]
+    return arr;
   }, [today]);
 
   // Load teams, projects index
@@ -196,35 +190,43 @@ function Dashboard({ user }) {
       return;
     }
 
-    const dateList = eachDate(fromDate, toDate);
-    const todayISO = toISO(today);
-
     setLoadingHours(true);
 
+    // ---- Employee KPIs (WIP, crossed ECD) for *today* (IST) ----
+    const todayISO = ymdIST(today);
     const nextKpi = {};
     for (const emp of employees) {
       try {
-        const { data } = await axios.get(`/api/employee/${emp.employee_id}/projects`, getAuth());
+        const { data } = await axios.get(
+          `/api/employee/${emp.employee_id}/projects`,
+          { ...getAuth(), params: { date: todayISO } } // be explicit
+        );
         const rows = data || [];
 
-        const wipList = rows.filter(r => {
-          const status = (r.employee_project_status || '').toLowerCase();
-          return status === 'active' || status === 'pending';
-        }).map(r => ({
-          project_id: r.project_id,
-          project_name: r.project_name,
-          ecd: projectsIndex[r.project_id]?.ecd || null
-        }));
+        const wipList = rows
+          .filter(r => {
+            const status = (r.employee_project_status || '').toLowerCase();
+            return status === 'active' || status === 'pending';
+          })
+          .map(r => ({
+            project_id: r.project_id,
+            project_name: r.project_name,
+            ecd: projectsIndex[r.project_id]?.ecd || null
+          }));
 
-        const crossedList = rows.filter(r => {
-          const ecd = projectsIndex[r.project_id]?.ecd ? String(projectsIndex[r.project_id]?.ecd).slice(0,10) : null;
-          const notCompleted = (r.employee_project_status || '').toLowerCase() !== 'completed';
-          return ecd && ecd < todayISO && notCompleted;
-        }).map(r => ({
-          project_id: r.project_id,
-          project_name: r.project_name,
-          ecd: projectsIndex[r.project_id]?.ecd || null
-        }));
+        const crossedList = rows
+          .filter(r => {
+            const ecd = projectsIndex[r.project_id]?.ecd
+              ? String(projectsIndex[r.project_id]?.ecd).slice(0, 10)
+              : null;
+            const notCompleted = (r.employee_project_status || '').toLowerCase() !== 'completed';
+            return ecd && ecd < todayISO && notCompleted;
+          })
+          .map(r => ({
+            project_id: r.project_id,
+            project_name: r.project_name,
+            ecd: projectsIndex[r.project_id]?.ecd || null
+          }));
 
         nextKpi[emp.employee_id] = {
           wip: wipList.length,
@@ -238,124 +240,96 @@ function Dashboard({ user }) {
     }
     setEmpKpi(nextKpi);
 
-    // Hours totals (util vs project) for the selected team
-    let utilHrs = 0;
-    let projHrs = 0;
-    for (const emp of employees) {
-      for (const d of dateList) {
-        try {
-          const { data } = await axios.get(`/api/daily-entries/${emp.employee_id}/${d}`, getAuth());
-          const acts = Array.isArray(data?.activities) ? data.activities : [];
-          const projs = Array.isArray(data?.projects) ? data.projects : [];
-          utilHrs += acts.reduce((s, a) => s + Number(a.hours || 0), 0);
-          projHrs += projs.reduce((s, p) => s + Number(p.hours || 0), 0);
-        } catch { /* ignore */ }
+    // ---- Team totals (Util vs Project) for the selected range ----
+    try {
+      const { data } = await axios.get(
+        `/api/team/${teamId}/utilization-summary`,
+        { ...getAuth(), params: { startDate: fromDate, endDate: toDate } }
+      );
+      const rows = data?.rows || [];
+
+      // Sum all utilization buckets except P
+      let utilHrs = 0;
+      let projHrs = 0;
+      for (const r of rows) {
+        const P = Number(r.P || r["P"] || 0);
+        const S  = Number(r.S  || r["S"]  || 0);
+        const C  = Number(r.C  || r["C"]  || 0);
+        const M  = Number(r.M  || r["M"]  || 0);
+        const A  = Number(r.A  || r["A"]  || 0);
+        const CP = Number(r.CP || r["CP"] || 0);
+        const O  = Number(r.O  || r["O"]  || 0);
+        const T1 = Number(r.T1 || r["T1"] || 0);
+        const T2 = Number(r.T2 || r["T2"] || 0);
+        const NA = Number(r.NA || r["NA"] || 0);
+        const L  = Number(r.L  || r["L"]  || 0);
+        const SW = Number(r.SW || r["SW"] || 0);
+
+        projHrs += P;
+        utilHrs += S + C + M + A + CP + O + T1 + T2 + NA + L + SW;
       }
+
+      setUtilizationHours(Number(utilHrs.toFixed(2)));
+      setProjectHours(Number(projHrs.toFixed(2)));
+    } catch {
+      setUtilizationHours(0);
+      setProjectHours(0);
+    } finally {
+      setLoadingHours(false);
     }
-    setUtilizationHours(Number(utilHrs.toFixed(2)));
-    setProjectHours(Number(projHrs.toFixed(2)));
-    setLoadingHours(false);
-  }, [teamId, employees, fromDate, toDate, projectsIndex, today]); // eslint-disable-line
+  }, [teamId, employees, projectsIndex, fromDate, toDate, today]); // eslint-disable-line
 
   useEffect(() => { computeSelectedTeam(); }, [computeSelectedTeam]); // eslint-disable-line
 
-  // Donut = sum of project hours by project for the selected team (all employees)
+  // Donut = sum of project hours by project for the selected team (server-side)
   const computeDonutForTeamProjects = useCallback(async () => {
-    if (!teamId || employees.length === 0) {
-      setDonutProjectData([]);
-      return;
-    }
-    const dateList = eachDate(fromDate, toDate);
+    if (!teamId) { setDonutProjectData([]); return; }
     setLoadingDonut(true);
-
-    const byProject = new Map(); // key: pid|||pname -> hours
     try {
-      for (const emp of employees) {
-        for (const d of dateList) {
-          try {
-            const { data } = await axios.get(`/api/daily-entries/${emp.employee_id}/${d}`, getAuth());
-            const projs = Array.isArray(data?.projects) ? data.projects : [];
-            for (const p of projs) {
-              const pid = p.project_id ?? p.projectId ?? 'Unknown';
-              const pname = p.project_name ?? p.projectName ?? String(pid);
-              const hrs = Number(p.hours ?? p.employee_project_hours ?? 0);
-              const key = `${pid}|||${pname}`;
-              byProject.set(key, (byProject.get(key) || 0) + hrs);
-            }
-          } catch { /* ignore one day */ }
-        }
-      }
-    } finally {
-      const arr = Array.from(byProject.entries()).map(([k, v]) => {
-        const [pid, pname] = k.split('|||');
-        return {
-          project_id: pid,
-          project_name: pname,
-          name: `${pname} (${pid})`,
-          value: Number(v.toFixed(2)),
-        };
-      });
-      arr.sort((a, b) => b.value - a.value);
+      const { data } = await axios.get(
+        `/api/team/${teamId}/project-hours`,
+        { ...getAuth(), params: { startDate: fromDate, endDate: toDate } }
+      );
+      const arr = (data?.rows || []).map(r => ({
+        project_id: r.project_id,
+        project_name: r.project_name || String(r.project_id),
+        name: `${r.project_name || r.project_id} (${r.project_id})`,
+        value: Number(Number(r.total_hours || 0).toFixed(2)),
+      }));
       setDonutProjectData(arr);
+    } catch {
+      setDonutProjectData([]);
+    } finally {
       setLoadingDonut(false);
     }
-  }, [teamId, employees, fromDate, toDate]);
+  }, [teamId, fromDate, toDate]);
 
   useEffect(() => { computeDonutForTeamProjects(); }, [computeDonutForTeamProjects]);
 
-  // Compute contributors for selected project
+  // Compute contributors for selected project (range, all teams)
   const computeContributorsForProject = useCallback(async () => {
-    if (!selectedProject || !teamId || employees.length === 0) {
+    if (!selectedProject?.project_id || !fromDate || !toDate) {
       setProjContribRows([]);
       return;
     }
-    const dateList = eachDate(fromDate, toDate);
     setLoadingProjContrib(true);
-
-    const totalsByEmp = new Map(); // empId -> hours
-    const namesByEmp = new Map();  // empId -> name
-
     try {
-      for (const emp of employees) {
-        const fullName = `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || `Emp ${emp.employee_id}`;
-        namesByEmp.set(emp.employee_id, fullName);
-
-        let sum = 0;
-        for (const d of dateList) {
-          try {
-            const { data } = await axios.get(`/api/daily-entries/${emp.employee_id}/${d}`, getAuth());
-            const projs = Array.isArray(data?.projects) ? data.projects : [];
-            for (const p of projs) {
-              const pid = p.project_id ?? p.projectId;
-              const pname = (p.project_name ?? p.projectName ?? '').toString();
-              const hrs = Number(p.hours ?? p.employee_project_hours ?? 0);
-
-              const idMatch = selectedProject.project_id
-                ? String(pid) === String(selectedProject.project_id)
-                : false;
-
-              const nameMatch = !selectedProject.project_id && selectedProject.project_name
-                ? pname.toLowerCase() === selectedProject.project_name.toLowerCase()
-                : false;
-
-              if (idMatch || nameMatch) sum += hrs;
-            }
-          } catch { /* ignore day */ }
-        }
-        if (sum > 0) totalsByEmp.set(emp.employee_id, Number(sum.toFixed(2)));
-      }
-    } finally {
-      const rows = Array.from(totalsByEmp.entries())
-        .map(([eid, hours]) => ({
-          employee_id: eid,
-          employee_name: namesByEmp.get(eid) || String(eid),
-          total_hours: hours
-        }))
-        .sort((a, b) => b.total_hours - a.total_hours);
+      const { data } = await axios.get(
+        `/api/projects/${selectedProject.project_id}/contributors`,
+        { ...getAuth(), params: { startDate: fromDate, endDate: toDate } }
+      );
+      const rows = (data?.rows || []).map(r => ({
+        employee_id: r.employee_id,
+        employee_name: r.employee_name || `Emp ${r.employee_id}`,
+        total_hours: Number(r.total_hours || 0),
+      }));
       setProjContribRows(rows);
+    } catch {
+      setProjContribRows([]);
+    } finally {
       setLoadingProjContrib(false);
     }
-  }, [selectedProject, teamId, employees, fromDate, toDate]);
+  }, [selectedProject, fromDate, toDate]);
 
   // --------- Missing daily entries (today + previous 7 days) ----------
   const computeMissingDailyEntries = useCallback(async () => {
@@ -376,13 +350,11 @@ function Dashboard({ user }) {
         for (const d of last8Days) {
           let filled = false;
           try {
-            const { data } = await axios.get(`/api/daily-entries/${emp.employee_id}/${d}`, getAuth());
-            const acts = Array.isArray(data?.activities) ? data.activities : [];
-            const projs = Array.isArray(data?.projects) ? data.projects : [];
-            // consider it filled if any activity or project hours exist (> 0 or entries present)
-            const hasActs = acts.some(a => Number(a.hours || 0) > 0) || acts.length > 0;
-            const hasProjs = projs.some(p => Number(p.hours || p.employee_project_hours || 0) > 0) || projs.length > 0;
-            filled = hasActs || hasProjs;
+            const { data } = await axios.get(
+              `/api/daily-entries/${emp.employee_id}/${d}/summary`,
+              getAuth()
+            );
+            filled = !!data?.has_any_entry; // green if any util OR project entry exists
           } catch {
             filled = false; // treat error as not filled
           }
@@ -460,7 +432,7 @@ function Dashboard({ user }) {
   const excelTableSx = {
     tableLayout: 'fixed',
     borderCollapse: 'collapse',
-    minWidth: '100%',       // ensure table stretches to parent width
+    minWidth: '100%',
     width: '100%',
     '& th, & td': {
       border: '1px solid',
@@ -469,7 +441,7 @@ function Dashboard({ user }) {
       fontSize: 12,
       lineHeight: 1.25,
       whiteSpace: 'nowrap',
-      overflow: 'hidden',   // prevent width growth by long content
+      overflow: 'hidden',
       textOverflow: 'ellipsis',
     },
     '& thead th': {
@@ -598,7 +570,7 @@ function Dashboard({ user }) {
         <Box
           sx={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', // three equal columns
+            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
             gap: `${GRID_GAP}px`,
             alignItems: 'start',
           }}
@@ -792,7 +764,7 @@ function Dashboard({ user }) {
               <CardHeader
                 avatar={<SearchIcon />}
                 title="Find Contributors by Project"
-                subheader="Select a project to see contributors (within selected team & date range)"
+                subheader="Select a project to see contributors (across all teams in date range)"
                 sx={{ pb: 1.5 }}
               />
               <Divider />
@@ -820,7 +792,7 @@ function Dashboard({ user }) {
                     variant="contained"
                     startIcon={<SearchIcon />}
                     onClick={computeContributorsForProject}
-                    disabled={!teamId || !selectedProject || loadingProjContrib}
+                    disabled={!selectedProject || loadingProjContrib}
                   >
                     {loadingProjContrib ? 'Searching…' : 'Search'}
                   </Button>
@@ -837,7 +809,7 @@ function Dashboard({ user }) {
                     </Stack>
                   ) : projContribRows.length === 0 ? (
                     <Typography variant="body2" color="text.secondary">
-                      No contributors found for this project in the selected team and date range.
+                      No contributors found for this project in the selected date range.
                     </Typography>
                   ) : (
                     <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>

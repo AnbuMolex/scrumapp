@@ -12,7 +12,8 @@ function TeamScrumReport({ user }) {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [selectedTeamId, setSelectedTeamId] = useState('');
-  const [reportType, setReportType] = useState('project'); // 'project' | 'utilization' | 'utilization_all'
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState('ALL'); // works for both report types when single team selected
+  const [reportType, setReportType] = useState('project'); // 'project' | 'utilization'
   const [teams, setTeams] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -27,7 +28,7 @@ function TeamScrumReport({ user }) {
   const sanitizeSheetName = (name = 'Sheet') =>
     name.replace(/[\\/*?:[\]]/g, ' ').slice(0, 31) || 'Sheet';
 
-  // ===== Boot & persist =====
+  // ===== Persist UI state =====
   useEffect(() => {
     if (user?.employee_id && localStorage.getItem('token')) {
       const saved = localStorage.getItem('teamScrumReportState');
@@ -36,12 +37,8 @@ function TeamScrumReport({ user }) {
         setStartDate(s.startDate || '');
         setEndDate(s.endDate || '');
         setSelectedTeamId(s.selectedTeamId || '');
-        // Coerce old values; now we support 'utilization_all' explicitly
-        setReportType(
-          s.reportType === 'utilization' || s.reportType === 'utilization_all'
-            ? s.reportType
-            : 'project'
-        );
+        setSelectedEmployeeId(s.selectedEmployeeId || 'ALL');
+        setReportType(s.reportType === 'utilization' ? 'utilization' : 'project');
       }
 
       (async () => {
@@ -82,10 +79,10 @@ function TeamScrumReport({ user }) {
     if (user?.employee_id && localStorage.getItem('token')) {
       localStorage.setItem(
         'teamScrumReportState',
-        JSON.stringify({ startDate, endDate, selectedTeamId, reportType })
+        JSON.stringify({ startDate, endDate, selectedTeamId, selectedEmployeeId, reportType })
       );
     }
-  }, [startDate, endDate, selectedTeamId, reportType, user]);
+  }, [startDate, endDate, selectedTeamId, selectedEmployeeId, reportType, user]);
 
   useEffect(() => {
     return () => {
@@ -93,10 +90,11 @@ function TeamScrumReport({ user }) {
     };
   }, []);
 
-  // Load employees only when a single team is chosen (needed for Project report building)
+  // Load employees when a single team is chosen
   useEffect(() => {
     if (!selectedTeamId || selectedTeamId === 'ALL') {
       setEmployees([]);
+      setSelectedEmployeeId('ALL');
       return;
     }
     setLoading(true);
@@ -112,6 +110,7 @@ function TeamScrumReport({ user }) {
     setStartDate('');
     setEndDate('');
     setSelectedTeamId('');
+    setSelectedEmployeeId('ALL');
     setReportType('project');
     setTeams([]);
     setEmployees([]);
@@ -126,11 +125,12 @@ function TeamScrumReport({ user }) {
     return data || [];
   };
 
-  // { activities: [...], projectEntries: [...], assignments: [...] }
+  // Range report per employee (matches backend daily.js)
+  // returns { activities: [{report_date, activity_type, hours, comment}], projectEntries: [...] }
   const fetchEmployeeRangeReport = async (employeeId) => {
     try {
       const { data } = await axios.get(
-        `/api/daily/employee/${employeeId}/range`,
+        `/api/employee/${employeeId}/range`,
         { ...getAuthHeaders(), params: { startDate, endDate } }
       );
       return {
@@ -164,13 +164,18 @@ function TeamScrumReport({ user }) {
     };
   };
 
-  // ===== Project report (unchanged) =====
-  const buildProjectRowsForTeam = async (t) => {
+  // ===== Project report (per team sheet; supports employee filter) =====
+  const buildProjectRowsForTeam = async (t, employeeIdFilter = 'ALL') => {
     const teamEmployees = await fetchEmployeesForTeam(t.team_id);
-    if (!teamEmployees.length) return [{ Note: 'No employees in this team.' }];
+    const filteredEmployees =
+      employeeIdFilter === 'ALL'
+        ? teamEmployees
+        : teamEmployees.filter(e => String(e.employee_id) === String(employeeIdFilter));
+
+    if (!filteredEmployees.length) return [{ Note: 'No employees in this team.' }];
 
     const reports = await Promise.all(
-      teamEmployees.map(async (emp) => ({
+      filteredEmployees.map(async (emp) => ({
         employee: emp,
         data: await fetchEmployeeRangeReport(emp.employee_id),
       }))
@@ -205,34 +210,12 @@ function TeamScrumReport({ user }) {
       });
     });
 
-    if (!hasAnyEntries) {
-      reports.forEach(({ employee, data }) => {
-        (data.assignments || []).forEach((raw) => {
-          const e = normalizeEntry(raw);
-          if (!e.project_id) return;
-          const key = `${employee.employee_id}::${e.project_id}`;
-          if (!rowsMap.has(key)) {
-            rowsMap.set(key, {
-              Employee: `${employee.first_name} ${employee.last_name}`,
-              'Employee ID': employee.employee_id,
-              'Project ID': e.project_id,
-              'Project Name': e.project_name,
-              'Hours Spent': 0,
-              Comments: new Set(
-                (e.employee_project_comments ? [String(e.employee_project_comments).trim()] : [])
-              ),
-            });
-          }
-        });
-      });
-    }
+    if (!hasAnyEntries) return [{ Note: 'No project contributions in selected date range.' }];
 
     let rows = Array.from(rowsMap.values()).map((r) => ({
       ...r,
       Comments: Array.from(r.Comments || []).join(' | '),
     }));
-
-    if (!rows.length) rows = [{ Note: 'No data in selected date range.' }];
 
     rows.sort(
       (a, b) =>
@@ -245,7 +228,7 @@ function TeamScrumReport({ user }) {
   const exportProjectReport = async () => {
     const workbook = XLSX.utils.book_new();
     const targetTeams =
-      selectedTeamId === 'ALL'
+      !selectedTeamId || selectedTeamId === 'ALL'
         ? teams
         : teams.filter((t) => String(t.team_id) === String(selectedTeamId));
 
@@ -255,123 +238,137 @@ function TeamScrumReport({ user }) {
     }
 
     for (const t of targetTeams) {
-      const rows = await buildProjectRowsForTeam(t);
+      const rows = await buildProjectRowsForTeam(
+        t,
+        selectedTeamId === 'ALL' ? 'ALL' : selectedEmployeeId // employee filter only when single team view
+      );
       const sheet = XLSX.utils.json_to_sheet(rows);
       XLSX.utils.book_append_sheet(workbook, sheet, sanitizeSheetName(t.team_name || `Team_${t.team_id}`));
     }
 
-    const suffix = selectedTeamId === 'ALL' ? 'AllTeams' : sanitizeSheetName(teamIdToName(selectedTeamId));
+    const suffix =
+      !selectedTeamId || selectedTeamId === 'ALL'
+        ? 'AllTeams'
+        : `${sanitizeSheetName(teamIdToName(selectedTeamId))}${selectedEmployeeId !== 'ALL' ? `_Emp_${selectedEmployeeId}` : ''}`;
+
     XLSX.writeFile(workbook, `Project_Report_${suffix}_${startDate}_to_${endDate}.xlsx`);
   };
 
-  // ===== Utilization SUMMARY (single team via SQL) =====
-  const exportUtilizationReport = async () => {
-    if (!selectedTeamId || selectedTeamId === 'ALL') {
-      setError('Pick a single team for Utilization report.');
-      return;
-    }
-    const sheet = await buildUtilizationSheetForTeam(selectedTeamId);
-    if (!sheet) return;
+  // ===== Utilization report (one sheet per team, ONLY from daily_entry_utilization) =====
+  // Exact order you specified (compulsory columns):
+  const ACTIVITY_LABELS = [
+    'Leave','Misc','Meeting','Method development','Correlation','Projects',
+    'Supervision','Trainer','CPM','Application','Trainee','Software',
+  ];
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, sheet, sanitizeSheetName(teamIdToName(selectedTeamId)));
-    XLSX.writeFile(
-      wb,
-      `Utilization_Summary_${sanitizeSheetName(teamIdToName(selectedTeamId))}_${startDate}_to_${endDate}.xlsx`
-    );
+  // Normalize backend activity strings to our labels
+  const normalizeActivityLabel = (raw) => {
+    if (!raw) return null;
+    const s = String(raw).trim().toLowerCase();
+    switch (s) {
+      case 'leave': return 'Leave';
+      case 'misc': return 'Misc';
+      case 'meeting': return 'Meeting';
+      case 'method development': return 'Method development';
+      case 'correlation': return 'Correlation';
+      case 'projects': return 'Projects'; // from daily utilization "Projects" only
+      case 'supervision': return 'Supervision';
+      case 'trainer': return 'Trainer';
+      case 'cpm': return 'CPM';
+      case 'application': return 'Application';
+      case 'trainee': return 'Trainee';
+      case 'software': return 'Software';
+      default: return null; // ignore any other/free-text activities
+    }
   };
 
-  // ===== Utilization SUMMARY (ALL teams, one sheet per team) =====
-  const exportUtilizationAllTeams = async () => {
-    if (!teams.length) {
-      setError('No teams available.');
-      return;
-    }
-    const wb = XLSX.utils.book_new();
-    for (const t of teams) {
-      const sheet = await buildUtilizationSheetForTeam(String(t.team_id));
-      const name = sanitizeSheetName(t.team_name || `Team_${t.team_id}`);
-      XLSX.utils.book_append_sheet(wb, sheet || XLSX.utils.aoa_to_sheet([['No data']]), name);
-    }
-    XLSX.writeFile(
-      wb,
-      `Utilization_AllTeams_${startDate}_to_${endDate}.xlsx`
-    );
-  };
+  const buildUtilizationSheetForTeam = async (teamId, employeeIdFilter = 'ALL') => {
+    const teamEmployees = await fetchEmployeesForTeam(teamId);
+    const filteredEmployees =
+      employeeIdFilter === 'ALL'
+        ? teamEmployees
+        : teamEmployees.filter(e => String(e.employee_id) === String(employeeIdFilter));
 
-  // Build a utilization sheet for ONE team using backend SQL summary
-  const buildUtilizationSheetForTeam = async (teamId) => {
-    // Desired column order & labels
-    const ACTIVITY_COLUMNS = [
-      'Leave','Misc','Meeting','Method development','Correlation','Projects',
-      'Supervision','Trainer','CPM','Application','Trainee','Software'
-    ];
-    // Backend -> label mapping (assumption from your schema)
-    const CODE_TO_LABEL = {
-      L: 'Leave',
-      O: 'Misc',
-      M: 'Meeting',
-      NA: 'Method development',
-      C: 'Correlation',
-      P: 'Projects',
-      S: 'Supervision',
-      T1: 'Trainer',
-      CP: 'CPM',
-      A: 'Application',
-      T2: 'Trainee',
-      SW: 'Software',
-    };
+    const rows = [];
 
-    // Fetch aggregated (per-employee) sums from backend
-    let summary;
-    try {
-      const { data } = await axios.get(
-        `/api/daily/team/${teamId}/utilization-summary`,
-        { ...getAuthHeaders(), params: { startDate, endDate } }
+    if (!filteredEmployees.length) {
+      const header = ['Employee', ...ACTIVITY_LABELS, 'Total'];
+      const ws = XLSX.utils.aoa_to_sheet([header, ['—', ...ACTIVITY_LABELS.map(() => 0), 0]]);
+      return ws;
+    }
+
+    // For each employee, pull ONLY daily_entry_utilization from the range endpoint
+    for (const emp of filteredEmployees) {
+      const { activities } = await fetchEmployeeRangeReport(emp.employee_id);
+
+      // seed zeros for every compulsory header
+      const agg = {};
+      ACTIVITY_LABELS.forEach(lbl => { agg[lbl] = 0; });
+
+      // sum hours by normalized activity label
+      for (const a of (activities || [])) {
+        const lbl = normalizeActivityLabel(a.activity_type);
+        if (!lbl) continue;
+        const h = Number(a.hours || 0);
+        if (Number.isFinite(h)) agg[lbl] += h;
+      }
+
+      // Round to 2 decimals and compute Total
+      ACTIVITY_LABELS.forEach(lbl => { agg[lbl] = Number(Number(agg[lbl]).toFixed(2)); });
+      const total = Number(
+        ACTIVITY_LABELS.reduce((s, lbl) => s + Number(agg[lbl] || 0), 0).toFixed(2)
       );
-      summary = data?.rows || [];
-    } catch (e) {
-      setError(e?.response?.data?.message || `Failed to load utilization summary for team ${teamId}.`);
-      return null;
-    }
 
-    // Transform backend row to desired columns
-    const rows = summary.map(row => {
-      const name = row.name || '—';
-      const out = { Employee: name };
-      // Seed zeros
-      ACTIVITY_COLUMNS.forEach(lbl => { out[lbl] = 0; });
-
-      // For each code in the row, map to label and sum
-      Object.keys(row).forEach(k => {
-        if (k === 'name') return;
-        const label = CODE_TO_LABEL[k];
-        if (!label) return;
-        const val = Number(row[k] || 0);
-        if (Number.isFinite(val)) out[label] += val;
+      rows.push({
+        Employee: `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || `Emp ${emp.employee_id}`,
+        ...agg,
+        Total: total,
       });
+    }
 
-      // Total = sum of all activity columns
-      out.Total = Number(
-        ACTIVITY_COLUMNS.reduce((s, lbl) => s + Number(out[lbl] || 0), 0).toFixed(2)
-      );
-
-      // Round display to 2 decimals
-      ACTIVITY_COLUMNS.forEach(lbl => { out[lbl] = Number(Number(out[lbl]).toFixed(2)); });
-
-      return out;
-    });
-
-    // Sort by Employee name
+    // Sort by employee for readability
     rows.sort((a, b) => (a.Employee || '').localeCompare(b.Employee || ''));
 
-    const header = ['Employee', ...ACTIVITY_COLUMNS, 'Total'];
+    const header = ['Employee', ...ACTIVITY_LABELS, 'Total'];
     const wsData = [
       header,
-      ...rows.map(r => header.map(h => r[h] ?? 0)),
+      ...rows.map(r => header.map(h => r[h] ?? (h === 'Employee' ? '—' : 0))),
     ];
 
     return XLSX.utils.aoa_to_sheet(wsData);
+  };
+
+  const exportUtilizationReport = async () => {
+    const wb = XLSX.utils.book_new();
+    const targetTeams =
+      !selectedTeamId || selectedTeamId === 'ALL'
+        ? teams
+        : teams.filter((t) => String(t.team_id) === String(selectedTeamId));
+
+    if (!targetTeams.length) {
+      setError('No teams available.');
+      return;
+    }
+
+    for (const t of targetTeams) {
+      const sheet = await buildUtilizationSheetForTeam(
+        String(t.team_id),
+        // Employee filter applies when a single team is chosen; ignored for All Teams
+        (!selectedTeamId || selectedTeamId === 'ALL') ? 'ALL' : selectedEmployeeId
+      );
+      const name = sanitizeSheetName(t.team_name || `Team_${t.team_id}`);
+      XLSX.utils.book_append_sheet(wb, sheet, name);
+    }
+
+    const suffix =
+      !selectedTeamId || selectedTeamId === 'ALL'
+        ? 'AllTeams'
+        : `${sanitizeSheetName(teamIdToName(selectedTeamId))}${selectedEmployeeId !== 'ALL' ? `_Emp_${selectedEmployeeId}` : ''}`;
+
+    XLSX.writeFile(
+      wb,
+      `Utilization_${suffix}_${startDate}_to_${endDate}.xlsx`
+    );
   };
 
   const handleExport = async () => {
@@ -384,19 +381,9 @@ function TeamScrumReport({ user }) {
     try {
       setLoading(true);
       if (reportType === 'project') {
-        if (!selectedTeamId) {
-          setError('Select a team (or All Teams) for Project report.');
-          return;
-        }
         await exportProjectReport();
       } else if (reportType === 'utilization') {
-        if (!selectedTeamId || selectedTeamId === 'ALL') {
-          setError('Pick a single team for Utilization report.');
-          return;
-        }
         await exportUtilizationReport();
-      } else if (reportType === 'utilization_all') {
-        await exportUtilizationAllTeams();
       }
     } catch (err) {
       setError(err?.response?.data?.message || 'Error generating report.');
@@ -412,14 +399,16 @@ function TeamScrumReport({ user }) {
         <Alert severity="error" variant="outlined">Access denied. Admins and Team Leads only.</Alert>
       </Box>
     );
-    }
+  }
+
+  const singleTeamSelected = !!selectedTeamId && selectedTeamId !== 'ALL';
 
   return (
     <Box sx={{ px: { xs: 2, sm: 3 }, py: 3 }}>
       <Card elevation={4} sx={{ borderRadius: 3 }}>
         <CardHeader
           title={<Typography variant="h5" fontWeight={800}>Team Scrum Report</Typography>}
-          subheader="Select report type, team, and date range to export XLSX"
+          subheader="Select report type, team (optionally employee), and date range to export XLSX"
         />
         <Divider />
         <CardContent>
@@ -436,28 +425,49 @@ function TeamScrumReport({ user }) {
                     value={reportType}
                     onChange={(e) => setReportType(e.target.value)}
                   >
-                    <MenuItem value="project">Project report (sheets per team)</MenuItem>
-                    <MenuItem value="utilization">Utilization summary (single team)</MenuItem>
-                    <MenuItem value="utilization_all">Utilization summary (All teams)</MenuItem>
+                    <MenuItem value="project">Project report (sheet per team)</MenuItem>
+                    <MenuItem value="utilization">Utilization summary (sheet per team)</MenuItem>
                   </Select>
                 </FormControl>
               </Grid>
 
-              {/* Team selector is irrelevant for "utilization_all", so disable */}
               <Grid item xs={12} md={4}>
-                <FormControl fullWidth disabled={reportType === 'utilization_all'}>
+                <FormControl fullWidth>
                   <InputLabel id="team-select-label">Team</InputLabel>
                   <Select
                     labelId="team-select-label"
                     label="Team"
-                    value={reportType === 'utilization_all' ? 'ALL' : selectedTeamId}
-                    onChange={(e) => setSelectedTeamId(e.target.value)}
+                    value={!selectedTeamId ? '' : selectedTeamId}
+                    onChange={(e) => {
+                      setSelectedTeamId(e.target.value);
+                      setSelectedEmployeeId('ALL'); // reset employee filter on team change
+                    }}
                   >
                     <MenuItem value=""><em>Select Team</em></MenuItem>
-                    <MenuItem value="ALL">All Teams (Project report)</MenuItem>
+                    <MenuItem value="ALL">All Teams</MenuItem>
                     {teams.map((team) => (
                       <MenuItem key={team.team_id} value={String(team.team_id)}>
                         {team.team_name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+
+              {/* Employee filter: enabled whenever a single team is selected (both report types) */}
+              <Grid item xs={12} md={4}>
+                <FormControl fullWidth disabled={!singleTeamSelected}>
+                  <InputLabel id="employee-select-label">Employee</InputLabel>
+                  <Select
+                    labelId="employee-select-label"
+                    label="Employee"
+                    value={selectedEmployeeId}
+                    onChange={(e) => setSelectedEmployeeId(e.target.value)}
+                  >
+                    <MenuItem value="ALL">All Employees</MenuItem>
+                    {employees.map((emp) => (
+                      <MenuItem key={emp.employee_id} value={String(emp.employee_id)}>
+                        {emp.first_name} {emp.last_name} (ID: {emp.employee_id})
                       </MenuItem>
                     ))}
                   </Select>

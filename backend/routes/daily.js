@@ -352,6 +352,7 @@ const postProjectHandler = async (req, res) => {
         ]
       );
 
+      // Maintain projects.actual_start_date as min of any employee_project_start_date
       await client.query(
         `UPDATE projects p
             SET actual_start_date = sub.min_actual_start
@@ -456,7 +457,7 @@ const putProjectHandler = async (req, res) => {
 router.put('/employee/:employeeId/projects/:projectId', authenticateToken, putProjectHandler);
 router.put('/employee/:employeeId/projects/:projectId/:date', authenticateToken, putProjectHandler);
 
-const deleteProjectHandler = async (req, res) => {
+router.delete('/employee/:employeeId/projects/:projectId', authenticateToken, async (req, res) => {
   const { employeeId, projectId } = req.params;
   try {
     const day = getEntryDate(req, 'date');
@@ -486,14 +487,43 @@ const deleteProjectHandler = async (req, res) => {
     console.error('DELETE employee project utilization error:', err);
     res.status(err.status || 500).json({ message: err.message || 'Failed to remove employee project.' });
   }
-};
-router.delete('/employee/:employeeId/projects/:projectId', authenticateToken, deleteProjectHandler);
-router.delete('/employee/:employeeId/projects/:projectId/:date', authenticateToken, deleteProjectHandler);
+});
+router.delete('/employee/:employeeId/projects/:projectId/:date', authenticateToken, async (req, res) => {
+  const { employeeId, projectId, date } = req.params;
+  try {
+    const day = assertDateString(date, 'date');
+    const { rowCount } = await pool.query(
+      `DELETE FROM daily_entry_project_utilization
+        WHERE employee_id = $1 AND project_id = $2 AND entry_date = $3::date`,
+      [employeeId, norm(projectId), day]
+    );
+    if (!rowCount) return res.status(404).json({ message: 'Employee project (for date) not found.' });
+
+    await pool.query(
+      `UPDATE projects p
+          SET actual_start_date = sub.min_actual_start
+        FROM (
+          SELECT project_id, MIN(employee_project_start_date) AS min_actual_start
+            FROM daily_entry_project_utilization
+           WHERE project_id = $1
+        GROUP BY project_id
+        ) AS sub
+       WHERE p.project_id = $1`,
+      [norm(projectId)]
+    );
+
+    res.json({ message: 'Employee project (for date) removed' });
+  } catch (err) {
+    console.error('DELETE employee project utilization (with date) error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to remove employee project.' });
+  }
+});
 
 /* =============================================================================
    REPORTING
 ============================================================================= */
 
+// Range report for one employee
 router.get('/employee/:employeeId/range', authenticateToken, async (req, res) => {
   const { employeeId } = req.params;
   const { startDate, endDate } = req.query;
@@ -547,6 +577,115 @@ router.get('/employee/:employeeId/range', authenticateToken, async (req, res) =>
   }
 });
 
+// Summary for a day (used by “Missing Daily Entries” widget)
+router.get('/daily-entries/:employeeId/:date/summary', authenticateToken, async (req, res) => {
+  const { employeeId, date } = req.params;
+  try {
+    const day = assertDateString(date, 'date');
+
+    const utilQ = await pool.query(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(utilization_hours),0) AS hours
+         FROM daily_entry_utilization
+        WHERE employee_id = $1 AND entry_date = $2::date`,
+      [employeeId, day]
+    );
+
+    const projQ = await pool.query(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(employee_project_hours),0) AS hours
+         FROM daily_entry_project_utilization
+        WHERE employee_id = $1 AND entry_date = $2::date`,
+      [employeeId, day]
+    );
+
+    const utilCnt = Number(utilQ.rows[0].cnt || 0);
+    const projCnt = Number(projQ.rows[0].cnt || 0);
+    const utilHrs = Number(utilQ.rows[0].hours || 0);
+    const projHrs = Number(projQ.rows[0].hours || 0);
+
+    const hasAny = (utilCnt > 0 || projCnt > 0);
+
+    res.json({
+      has_any_entry: hasAny,
+      activities_count: utilCnt,
+      projects_count: projCnt,
+      total_hours: Number((utilHrs + projHrs).toFixed(2)),
+    });
+  } catch (err) {
+    console.error('GET daily summary error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to fetch summary.' });
+  }
+});
+
+// Contributors by project (spans all teams)
+router.get('/projects/:projectId/contributors', authenticateToken, async (req, res) => {
+  const { projectId } = req.params;
+  const { startDate, endDate } = req.query;
+  try {
+    const s = assertDateString(startDate, 'startDate');
+    const e = assertDateString(endDate, 'endDate');
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        depu.employee_id,
+        (e.first_name || ' ' || e.last_name) AS employee_name,
+        COALESCE(SUM(depu.employee_project_hours),0) AS total_hours,
+        e.team_id
+      FROM daily_entry_project_utilization depu
+      LEFT JOIN employees e ON e.employee_id = depu.employee_id
+      WHERE depu.project_id = $1
+        AND depu.entry_date BETWEEN $2::date AND $3::date
+      GROUP BY depu.employee_id, e.first_name, e.last_name, e.team_id
+      HAVING COALESCE(SUM(depu.employee_project_hours),0) > 0
+      ORDER BY total_hours DESC, employee_name ASC
+      `,
+      [String(projectId).trim(), s, e]
+    );
+
+    res.json({ rows });
+  } catch (err) {
+    console.error('GET /projects/:projectId/contributors error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to fetch contributors.' });
+  }
+});
+
+// Project hours for donut (selected team & range)
+router.get('/team/:teamId/project-hours', authenticateToken, async (req, res) => {
+  const { teamId } = req.params;
+  const { startDate, endDate } = req.query;
+
+  try {
+    const s = assertDateString(startDate, 'startDate');
+    const e = assertDateString(endDate, 'endDate');
+
+    const { rows } = await pool.query(
+      `
+      WITH team_emp AS (
+        SELECT employee_id FROM employees WHERE team_id = $1
+      )
+      SELECT
+        depu.project_id,
+        COALESCE(depu.project_name, p.project_name) AS project_name,
+        COALESCE(SUM(depu.employee_project_hours),0) AS total_hours
+      FROM daily_entry_project_utilization depu
+      JOIN team_emp te ON te.employee_id = depu.employee_id
+      LEFT JOIN projects p ON p.project_id = depu.project_id
+      WHERE depu.entry_date BETWEEN $2::date AND $3::date
+      GROUP BY depu.project_id, COALESCE(depu.project_name, p.project_name)
+      HAVING COALESCE(SUM(depu.employee_project_hours),0) > 0
+      ORDER BY total_hours DESC, project_name ASC
+      `,
+      [teamId, s, e]
+    );
+
+    res.json({ rows });
+  } catch (err) {
+    console.error('GET /team/:teamId/project-hours error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to fetch project hours.' });
+  }
+});
+
+// Utilization summary table by team (your existing query)
 router.get('/team/:teamId/utilization-summary', authenticateToken, async (req, res) => {
   const { teamId } = req.params;
   const { startDate, endDate } = req.query;
