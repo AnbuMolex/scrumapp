@@ -116,7 +116,15 @@ function DailyEntry({ user }) {
   useEffect(() => {
     if (!selectedTeamId || user.role === 'employee') return;
     axios.get(`/api/employees/team/${selectedTeamId}`, getAuth())
-      .then(res => { setEmployees(res.data || []); setSelectedEmployeeId(null); })
+      .then(res => {
+        const list = res.data || [];
+        setEmployees(list);
+
+        // only reset if saved employee is not valid anymore
+        if (!list.find(e => String(e.employee_id) === String(selectedEmployeeId))) {
+          setSelectedEmployeeId(null);
+        }
+      })
       .catch(() => setEmployees([]));
     // eslint-disable-next-line
   }, [selectedTeamId, user.role]);
@@ -195,6 +203,28 @@ function DailyEntry({ user }) {
     fetchProjects();
     // eslint-disable-next-line
   }, [selectedEmployeeId, selectedDate, allProjects.length]);
+
+  // ---------- Persistence ----------
+  // Restore on mount
+  useEffect(() => {
+    const savedTeam = localStorage.getItem('dailyEntry.teamId');
+    const savedEmp  = localStorage.getItem('dailyEntry.employeeId');
+    const savedDate = localStorage.getItem('dailyEntry.date');
+    const savedTab  = localStorage.getItem('dailyEntry.tab');
+
+    if (savedTeam) setSelectedTeamId(savedTeam);
+    if (savedEmp) setSelectedEmployeeId(savedEmp);
+    if (savedDate) setSelectedDate(savedDate);
+    if (savedTab) setTab(savedTab);
+  }, []);
+
+  // Save whenever they change
+  useEffect(() => {
+    if (selectedTeamId) localStorage.setItem('dailyEntry.teamId', selectedTeamId);
+    if (selectedEmployeeId) localStorage.setItem('dailyEntry.employeeId', selectedEmployeeId);
+    if (selectedDate) localStorage.setItem('dailyEntry.date', selectedDate);
+    if (tab) localStorage.setItem('dailyEntry.tab', tab);
+  }, [selectedTeamId, selectedEmployeeId, selectedDate, tab]);
 
   // ---------- Utilization ----------
   const validateUtilBeforeSave = () => {
@@ -293,82 +323,82 @@ function DailyEntry({ user }) {
     );
   }, [modalSearchTerm, allProjects]);
 
-  // ---------- Save (split) ----------
-  const saveUtilization = async () => {
-    if (!selectedEmployeeId || !selectedDate) {
-      setToast({ open: true, severity: 'warning', msg: 'Select team, employee, and date.' });
-      return;
-    }
-    const v = validateUtilBeforeSave();
-    if (v) { setToast({ open: true, severity: 'warning', msg: v }); return; }
-
-    const activities = utilizationEntries
-      .filter(e => norm(e.activity) && e.hours !== '' && e.hours != null)
-      .map(e => ({ activity: norm(e.activity), hours: Number(e.hours), comments: norm(e.comments) || null }));
-
-    setBusy(true);
-    try {
-      await axios.post('/api/daily-entries', {
-        employeeId: selectedEmployeeId,
-        entryDate: selectedDate,
-        activities
-      }, getAuth());
-
-      setToast({ open: true, severity: 'success', msg: 'Utilization saved.' });
-      fetchUtilization();
-    } catch (err) {
-      const msg = err?.response?.data?.message || err?.response?.data?.error || 'Save failed.';
-      setToast({ open: true, severity: 'error', msg });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveProjects = async () => {
-    if (!selectedEmployeeId || !selectedDate) {
-      setToast({ open: true, severity: 'warning', msg: 'Select team, employee, and date.' });
-      return;
-    }
-    const projPayloads = projectEntries
-      .filter(p => norm(p.project_id))
-      .map(p => {
-        const base = {
-          entryDate:   selectedDate,
-          projectName: norm(p.project_name) || null,
-          plannedStart: p.emp_planned_start || null,
-          plannedEnd:   p.emp_planned_end   || null,
-          startDate:    p.emp_actual_start  || null,
-          endDate:      p.emp_actual_end    || null,
-          status:       p.emp_status || 'Active',
-          comments:     norm(p.emp_comments) || null,
-          hours:        (p.emp_hours === '' || p.emp_hours == null) ? 0 : Number(p.emp_hours),
-        };
-        if (p.depu_id) {
-          return axios.put(
-            `/api/employee/${selectedEmployeeId}/projects/${encodeURIComponent(p.project_id)}`,
-            base,
+    // ---------- Save (split) ----------
+    const saveUtilization = async () => {
+      if (!selectedEmployeeId || !selectedDate) {
+        setToast({ open: true, severity: 'warning', msg: 'Select team, employee, and date.' });
+        return;
+      }
+      const v = validateUtilBeforeSave();
+      if (v) { setToast({ open: true, severity: 'warning', msg: v }); return; }
+  
+      const activities = utilizationEntries
+        .filter(e => norm(e.activity) && e.hours !== '' && e.hours != null)
+        .map(e => ({ activity: norm(e.activity), hours: Number(e.hours), comments: norm(e.comments) || null }));
+  
+      setBusy(true);
+      try {
+        await axios.post('/api/daily-entries', {
+          employeeId: selectedEmployeeId,
+          entryDate: selectedDate,
+          activities
+        }, getAuth());
+  
+        setToast({ open: true, severity: 'success', msg: 'Utilization saved.' });
+        fetchUtilization();
+      } catch (err) {
+        const msg = err?.response?.data?.message || err?.response?.data?.error || 'Save failed.';
+        setToast({ open: true, severity: 'error', msg });
+      } finally {
+        setBusy(false);
+      }
+    };
+  
+    const saveProjects = async () => {
+      if (!selectedEmployeeId || !selectedDate) {
+        setToast({ open: true, severity: 'warning', msg: 'Select team, employee, and date.' });
+        return;
+      }
+      const projPayloads = projectEntries
+        .filter(p => norm(p.project_id))
+        .map(p => {
+          const base = {
+            entryDate:   selectedDate,
+            projectName: norm(p.project_name) || null,
+            plannedStart: p.emp_planned_start || null,
+            plannedEnd:   p.emp_planned_end   || null,
+            startDate:    p.emp_actual_start  || null,
+            endDate:      p.emp_actual_end    || null,
+            status:       p.emp_status || 'Active',
+            comments:     norm(p.emp_comments) || null,
+            hours:        (p.emp_hours === '' || p.emp_hours == null) ? 0 : Number(p.emp_hours),
+          };
+          if (p.depu_id) {
+            return axios.put(
+              `/api/employee/${selectedEmployeeId}/projects/${encodeURIComponent(p.project_id)}`,
+              base,
+              getAuth()
+            );
+          }
+          return axios.post(
+            `/api/employee/${selectedEmployeeId}/projects`,
+            { projectId: norm(p.project_id), ...base },
             getAuth()
           );
-        }
-        return axios.post(
-          `/api/employee/${selectedEmployeeId}/projects`,
-          { projectId: norm(p.project_id), ...base },
-          getAuth()
-        );
-      });
-
-    setBusy(true);
-    try {
-      await Promise.all(projPayloads);
-      setToast({ open: true, severity: 'success', msg: 'Projects saved.' });
-      fetchProjects();
-    } catch (err) {
-      const msg = err?.response?.data?.message || err?.response?.data?.error || 'Save failed.';
-      setToast({ open: true, severity: 'error', msg });
-    } finally {
-      setBusy(false);
-    }
-  };
+        });
+  
+      setBusy(true);
+      try {
+        await Promise.all(projPayloads);
+        setToast({ open: true, severity: 'success', msg: 'Projects saved.' });
+        fetchProjects();
+      } catch (err) {
+        const msg = err?.response?.data?.message || err?.response?.data?.error || 'Save failed.';
+        setToast({ open: true, severity: 'error', msg });
+      } finally {
+        setBusy(false);
+      }
+    };
 
   // ---------- Render ----------
   if (!user?.employee_id) {

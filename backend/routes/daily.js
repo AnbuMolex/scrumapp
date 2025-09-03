@@ -208,16 +208,16 @@ async function fetchEmployeeProjectsForDate(employeeId, day, status) {
         depu.depu_id,
         depu.project_id,
         COALESCE(depu.project_name, p.project_name) AS project_name,
-        depu.employee_planned_start_date,
-        depu.employee_planned_end_date,
-        depu.employee_project_start_date,
-        depu.employee_project_end_date,
+        depu.employee_planned_start_date::text  AS employee_planned_start_date,
+        depu.employee_planned_end_date::text    AS employee_planned_end_date,
+        depu.employee_project_start_date::text  AS employee_project_start_date,
+        depu.employee_project_end_date::text    AS employee_project_end_date,
         depu.employee_project_status,
         depu.employee_project_hours,
         depu.employee_project_comments,
-        p.planned_start_date  AS project_planned_start_date,
-        p.planned_end_date    AS project_planned_end_date,
-        depu.entry_date
+        p.planned_start_date::text  AS project_planned_start_date,
+        p.planned_end_date::text    AS project_planned_end_date,
+        depu.entry_date::text       AS entry_date
       FROM daily_entry_project_utilization depu
       LEFT JOIN projects p ON p.project_id = depu.project_id
       WHERE depu.employee_id = $1
@@ -237,16 +237,16 @@ async function fetchEmployeeProjectsForDate(employeeId, day, status) {
         NULL::bigint AS depu_id,
         lp.project_id,
         COALESCE(lp.project_name, p.project_name) AS project_name,
-        lp.employee_planned_start_date,
-        lp.employee_planned_end_date,
-        lp.employee_project_start_date,
-        lp.employee_project_end_date,
+        lp.employee_planned_start_date::text  AS employee_planned_start_date,
+        lp.employee_planned_end_date::text    AS employee_planned_end_date,
+        lp.employee_project_start_date::text  AS employee_project_start_date,
+        lp.employee_project_end_date::text    AS employee_project_end_date,
         lp.employee_project_status,
         NULL::numeric AS employee_project_hours,
         NULL::text    AS employee_project_comments,
-        p.planned_start_date  AS project_planned_start_date,
-        p.planned_end_date    AS project_planned_end_date,
-        $2::date AS entry_date
+        p.planned_start_date::text  AS project_planned_start_date,
+        p.planned_end_date::text    AS project_planned_end_date,
+        $2::text AS entry_date
       FROM last_prior lp
       LEFT JOIN projects p ON p.project_id = lp.project_id
       WHERE lp.employee_project_status <> 'Completed'
