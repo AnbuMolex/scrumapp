@@ -602,10 +602,12 @@ router.get('/daily-entries/:employeeId/:date/summary', authenticateToken, async 
     const utilHrs = Number(utilQ.rows[0].hours || 0);
     const projHrs = Number(projQ.rows[0].hours || 0);
 
-    const hasAny = (utilCnt > 0 || projCnt > 0);
+    const has_any_entry  = utilCnt > 0 || projCnt > 0;
+    const has_both_entry = utilCnt > 0 && projCnt > 0; // <-- required rule
 
     res.json({
-      has_any_entry: hasAny,
+      has_any_entry,
+      has_both_entry,
       activities_count: utilCnt,
       projects_count: projCnt,
       total_hours: Number((utilHrs + projHrs).toFixed(2)),
@@ -613,39 +615,6 @@ router.get('/daily-entries/:employeeId/:date/summary', authenticateToken, async 
   } catch (err) {
     console.error('GET daily summary error:', err);
     res.status(err.status || 500).json({ message: err.message || 'Failed to fetch summary.' });
-  }
-});
-
-// Contributors by project (spans all teams)
-router.get('/projects/:projectId/contributors', authenticateToken, async (req, res) => {
-  const { projectId } = req.params;
-  const { startDate, endDate } = req.query;
-  try {
-    const s = assertDateString(startDate, 'startDate');
-    const e = assertDateString(endDate, 'endDate');
-
-    const { rows } = await pool.query(
-      `
-      SELECT
-        depu.employee_id,
-        (e.first_name || ' ' || e.last_name) AS employee_name,
-        COALESCE(SUM(depu.employee_project_hours),0) AS total_hours,
-        e.team_id
-      FROM daily_entry_project_utilization depu
-      LEFT JOIN employees e ON e.employee_id = depu.employee_id
-      WHERE depu.project_id = $1
-        AND depu.entry_date BETWEEN $2::date AND $3::date
-      GROUP BY depu.employee_id, e.first_name, e.last_name, e.team_id
-      HAVING COALESCE(SUM(depu.employee_project_hours),0) > 0
-      ORDER BY total_hours DESC, employee_name ASC
-      `,
-      [String(projectId).trim(), s, e]
-    );
-
-    res.json({ rows });
-  } catch (err) {
-    console.error('GET /projects/:projectId/contributors error:', err);
-    res.status(err.status || 500).json({ message: err.message || 'Failed to fetch contributors.' });
   }
 });
 
@@ -684,7 +653,47 @@ router.get('/team/:teamId/project-hours', authenticateToken, async (req, res) =>
     res.status(err.status || 500).json({ message: err.message || 'Failed to fetch project hours.' });
   }
 });
+// Contributors for a project in a selected date range
+router.get('/projects/:projectId/contributors', authenticateToken, async (req, res) => {
+  const { projectId } = req.params;
+  const { startDate, endDate } = req.query;
 
+  try {
+    const s = assertDateString(startDate, 'startDate');
+    const e = assertDateString(endDate, 'endDate');
+    if (s > e) {
+      const err = new Error('startDate cannot be after endDate');
+      err.status = 400;
+      throw err;
+    }
+
+    const { rows } = await pool.query(
+      `
+      SELECT
+        depu.employee_id,
+        (COALESCE(e.first_name,'') || ' ' || COALESCE(e.last_name,'')) AS employee_name,
+        COUNT(*) AS entry_count,
+        COALESCE(SUM(depu.employee_project_hours),0) AS total_hours
+      FROM daily_entry_project_utilization depu
+      LEFT JOIN employees e ON e.employee_id = depu.employee_id
+      WHERE depu.project_id = $1
+        AND depu.entry_date BETWEEN $2::date AND $3::date
+      GROUP BY depu.employee_id, e.first_name, e.last_name
+      HAVING COUNT(*) > 0                               -- show if any entry exists (even 0 hrs)
+      ORDER BY total_hours DESC, employee_name ASC
+      `,
+      [String(projectId).trim(), s, e]
+    );
+
+    // convenient total for the project in this range
+    const total_hours_in_range = rows.reduce((a, r) => a + Number(r.total_hours || 0), 0);
+
+    res.json({ rows, total_hours_in_range });
+  } catch (err) {
+    console.error('GET /projects/:projectId/contributors error:', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to fetch contributors.' });
+  }
+});
 // Utilization summary table by team (your existing query)
 router.get('/team/:teamId/utilization-summary', authenticateToken, async (req, res) => {
   const { teamId } = req.params;

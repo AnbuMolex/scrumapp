@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 
 // MUI
@@ -28,6 +28,9 @@ import {
   Button,
   CircularProgress,
   Autocomplete,
+  List,
+  ListItemButton,
+  ListItemText,
 } from '@mui/material';
 
 // Icons
@@ -57,11 +60,21 @@ const LAYOUT = {
 
 // Color palette
 const PROJECT_COLORS = [
-  '#1e88e5','#43a047','#e53935','#8e24aa','#fb8c00',
-  '#00897b','#3949ab','#d81b60','#7cb342','#00acc1',
-  '#5e35b1','#f4511e','#039be5','#7e57c2','#c0ca33',
-  '#8d6e63','#546e7a','#ef5350','#ab47bc'
+  '#1e88e5', '#43a047', '#e53935', '#8e24aa', '#fb8c00',
+  '#00897b', '#3949ab', '#d81b60', '#7cb342', '#00acc1',
+  '#5e35b1', '#f4511e', '#039be5', '#7e57c2', '#c0ca33',
+  '#8d6e63', '#546e7a', '#ef5350', '#ab47bc'
 ];
+
+// ===== Calendar color palette (hex) =====
+const CALENDAR_COLORS = {
+  filledBg:  '#2E7D32', // green
+  pendingBg: '#F9A825', // yellow (today < 2PM, no entry)
+  missingBg: '#D32F2F', // red   (weekday missing / today >= 2PM)
+  weekendBg: '#9E9E9E', // grey  (ignored if empty)
+  textOnDark: '#FFFFFF', // text on colored circles
+  futureText: '#9E9E9E', // text for future-day plain cells
+};
 
 function Dashboard({ user }) {
   const [teams, setTeams] = useState([]);
@@ -73,13 +86,21 @@ function Dashboard({ user }) {
   const [loadingHours, setLoadingHours] = useState(false);
 
   // === Time helpers (IST) ===
-  const ymdIST = (d) =>
-    new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+  const ymdIST = useCallback(
+    (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d),
+    []
+  );
 
   const parseISO = (s) => {
     const [y, m, d] = s.split('-').map(Number);
-    // Construct at local midnight; we only need the Y-M-D parts for rendering labels
     return new Date(y, m - 1, d);
+  };
+
+  // weekend helper
+  const isWeekendISO = (iso) => {
+    const d = parseISO(iso);
+    const dow = d.getDay(); // 0=Sun,6=Sat
+    return dow === 0 || dow === 6;
   };
 
   // date range (current month by default)
@@ -87,9 +108,30 @@ function Dashboard({ user }) {
   const [fromDate, setFromDate] = useState(() => {
     const d = new Date();
     d.setDate(1);
-    return ymdIST(d);
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
   });
-  const [toDate, setToDate] = useState(() => ymdIST(today)); // today in IST
+  const [toDate, setToDate] = useState(() => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(today)); // today in IST
+
+  // Full list of dates for the *current month* (IST). Future days render as outlined numbers.
+  const monthDays = useMemo(() => {
+    const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(today);
+    const todayIST = parseISO(ymd);
+    const start = new Date(todayIST);
+    start.setDate(1);
+
+    const end = new Date(todayIST);
+    end.setMonth(end.getMonth() + 1);
+    end.setDate(0); // last day of month
+
+    const arr = [];
+    const cur = new Date(start);
+    while (cur <= end) {
+      const iso = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(cur);
+      arr.push(iso);
+      cur.setDate(cur.getDate() + 1);
+    }
+    return arr;
+  }, [today]);
 
   // KPI map per employee (selected team)
   const [empKpi, setEmpKpi] = useState({});
@@ -113,30 +155,19 @@ function Dashboard({ user }) {
   const [projContribRows, setProjContribRows] = useState([]);   // [{employee_id, employee_name, total_hours}]
   const [loadingProjContrib, setLoadingProjContrib] = useState(false);
 
-  // Missing daily entries (today + previous 7 days)
+  // Missing daily entries (computed for all employees, month-to-date with rules)
   const [missingRows, setMissingRows] = useState([]); // [{employee_id, employee_name, missingCount}]
-  const [missingByEmp, setMissingByEmp] = useState({}); // {empId: {name, days:[{date, filled}]}}
+  const [missingByEmp, setMissingByEmp] = useState({}); // {empId: {name, days:[{date, state, weekendIgnored}], missingCount}}
   const [loadingMissing, setLoadingMissing] = useState(false);
 
-  // Calendar modal for per-employee day coloring
-  const [calOpen, setCalOpen] = useState(false);
-  const [calEmpName, setCalEmpName] = useState('');
-  const [calDays, setCalDays] = useState([]); // [{date, filled}]
+  // Selected employee to preview in the single calendar
+  const [selectedCalEmpId, setSelectedCalEmpId] = useState(null);
 
-  const getAuth = () => ({
-    headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-  });
-
-  const last8Days = useMemo(() => {
-    const arr = [];
-    const base = new Date(today);
-    for (let i = 0; i < 8; i++) {
-      const dd = new Date(base);
-      dd.setDate(base.getDate() - i);
-      arr.push(ymdIST(dd)); // IST-aligned
-    }
-    return arr;
-  }, [today]);
+  // Stable auth header
+  const getAuth = useCallback(
+    () => ({ headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }),
+    []
+  );
 
   // Load teams, projects index
   useEffect(() => {
@@ -159,7 +190,7 @@ function Dashboard({ user }) {
         setProjectsIndex(idx);
       })
       .catch(() => setProjectsIndex({}));
-  }, [user]); // eslint-disable-line
+  }, [user, getAuth]); // eslint-disable-line
 
   // When team changes, load employees (only for selected team)
   useEffect(() => {
@@ -172,6 +203,7 @@ function Dashboard({ user }) {
       setProjContribRows([]);
       setMissingRows([]);
       setMissingByEmp({});
+      setSelectedCalEmpId(null);
       return;
     }
     setLoadingEmp(true);
@@ -179,7 +211,7 @@ function Dashboard({ user }) {
       .then(res => setEmployees(res.data || []))
       .catch(() => setEmployees([]))
       .finally(() => setLoadingEmp(false));
-  }, [teamId]); // eslint-disable-line
+  }, [teamId, getAuth]); // eslint-disable-line
 
   // Compute selected team KPIs + totals
   const computeSelectedTeam = useCallback(async () => {
@@ -199,10 +231,11 @@ function Dashboard({ user }) {
       try {
         const { data } = await axios.get(
           `/api/employee/${emp.employee_id}/projects`,
-          { ...getAuth(), params: { date: todayISO } } // be explicit
+          { ...getAuth(), params: { date: todayISO } }
         );
         const rows = data || [];
 
+        // WIP = active/pending from daily_entry_project_utilization
         const wipList = rows
           .filter(r => {
             const status = (r.employee_project_status || '').toLowerCase();
@@ -211,21 +244,37 @@ function Dashboard({ user }) {
           .map(r => ({
             project_id: r.project_id,
             project_name: r.project_name,
-            ecd: projectsIndex[r.project_id]?.ecd || null
+            // show planned end (ECD) in the modal
+            ecd:
+              (r.employee_planned_end_date && String(r.employee_planned_end_date).slice(0, 10)) ||
+              (r.project_planned_end_date && String(r.project_planned_end_date).slice(0, 10)) ||
+              (projectsIndex[r.project_id]?.ecd ? String(projectsIndex[r.project_id]?.ecd).slice(0,10) : null),
           }));
 
+        // Crossed ECD = actual end > planned end (based ONLY on daily_entry_project_utilization)
         const crossedList = rows
           .filter(r => {
-            const ecd = projectsIndex[r.project_id]?.ecd
-              ? String(projectsIndex[r.project_id]?.ecd).slice(0, 10)
-              : null;
-            const notCompleted = (r.employee_project_status || '').toLowerCase() !== 'completed';
-            return ecd && ecd < todayISO && notCompleted;
+            const planned =
+              (r.employee_planned_end_date && String(r.employee_planned_end_date).slice(0, 10)) ||
+              (r.project_planned_end_date && String(r.project_planned_end_date).slice(0, 10)) ||
+              (projectsIndex[r.project_id]?.ecd ? String(projectsIndex[r.project_id]?.ecd).slice(0,10) : null);
+
+            const actual =
+              r.employee_project_end_date ? String(r.employee_project_end_date).slice(0, 10) : null;
+
+            // crossed iff both present and actual > planned
+            return planned && actual && actual > planned;
           })
           .map(r => ({
             project_id: r.project_id,
             project_name: r.project_name,
-            ecd: projectsIndex[r.project_id]?.ecd || null
+            // keep "ecd" as the planned end so your modal stays as-is
+            ecd:
+              (r.employee_planned_end_date && String(r.employee_planned_end_date).slice(0, 10)) ||
+              (r.project_planned_end_date && String(r.project_planned_end_date).slice(0, 10)) ||
+              (projectsIndex[r.project_id]?.ecd ? String(projectsIndex[r.project_id]?.ecd).slice(0,10) : null),
+            // (optional) include actual end if you ever want to show it in the modal
+            actual_end: r.employee_project_end_date ? String(r.employee_project_end_date).slice(0, 10) : null,
           }));
 
         nextKpi[emp.employee_id] = {
@@ -233,7 +282,7 @@ function Dashboard({ user }) {
           crossedECD: crossedList.length,
           wipList,
           crossedList
-        };
+};
       } catch {
         nextKpi[emp.employee_id] = { wip: 0, crossedECD: 0, wipList: [], crossedList: [] };
       }
@@ -252,18 +301,18 @@ function Dashboard({ user }) {
       let utilHrs = 0;
       let projHrs = 0;
       for (const r of rows) {
-        const P = Number(r.P || r["P"] || 0);
-        const S  = Number(r.S  || r["S"]  || 0);
-        const C  = Number(r.C  || r["C"]  || 0);
-        const M  = Number(r.M  || r["M"]  || 0);
-        const A  = Number(r.A  || r["A"]  || 0);
-        const CP = Number(r.CP || r["CP"] || 0);
-        const O  = Number(r.O  || r["O"]  || 0);
-        const T1 = Number(r.T1 || r["T1"] || 0);
-        const T2 = Number(r.T2 || r["T2"] || 0);
-        const NA = Number(r.NA || r["NA"] || 0);
-        const L  = Number(r.L  || r["L"]  || 0);
-        const SW = Number(r.SW || r["SW"] || 0);
+        const P  = Number(r.P  || r['P']  || 0);
+        const S  = Number(r.S  || r['S']  || 0);
+        const C  = Number(r.C  || r['C']  || 0);
+        const M  = Number(r.M  || r['M']  || 0);
+        const A  = Number(r.A  || r['A']  || 0);
+        const CP = Number(r.CP || r['CP'] || 0);
+        const O  = Number(r.O  || r['O']  || 0);
+        const T1 = Number(r.T1 || r['T1'] || 0);
+        const T2 = Number(r.T2 || r['T2'] || 0);
+        const NA = Number(r.NA || r['NA'] || 0);
+        const L  = Number(r.L  || r['L']  || 0);
+        const SW = Number(r.SW || r['SW'] || 0);
 
         projHrs += P;
         utilHrs += S + C + M + A + CP + O + T1 + T2 + NA + L + SW;
@@ -277,7 +326,7 @@ function Dashboard({ user }) {
     } finally {
       setLoadingHours(false);
     }
-  }, [teamId, employees, projectsIndex, fromDate, toDate, today]); // eslint-disable-line
+  }, [teamId, employees, projectsIndex, fromDate, toDate, today, ymdIST, getAuth]); // eslint-disable-line
 
   useEffect(() => { computeSelectedTeam(); }, [computeSelectedTeam]); // eslint-disable-line
 
@@ -302,11 +351,11 @@ function Dashboard({ user }) {
     } finally {
       setLoadingDonut(false);
     }
-  }, [teamId, fromDate, toDate]);
+  }, [teamId, fromDate, toDate, getAuth]);
 
   useEffect(() => { computeDonutForTeamProjects(); }, [computeDonutForTeamProjects]);
 
-  // Compute contributors for selected project (range, all teams)
+  // Compute contributors for selected project (selected date range)
   const computeContributorsForProject = useCallback(async () => {
     if (!selectedProject?.project_id || !fromDate || !toDate) {
       setProjContribRows([]);
@@ -318,53 +367,128 @@ function Dashboard({ user }) {
         `/api/projects/${selectedProject.project_id}/contributors`,
         { ...getAuth(), params: { startDate: fromDate, endDate: toDate } }
       );
+
       const rows = (data?.rows || []).map(r => ({
         employee_id: r.employee_id,
         employee_name: r.employee_name || `Emp ${r.employee_id}`,
         total_hours: Number(r.total_hours || 0),
+        entry_count: Number(r.entry_count || 0),
       }));
+
       setProjContribRows(rows);
     } catch {
       setProjContribRows([]);
     } finally {
       setLoadingProjContrib(false);
     }
-  }, [selectedProject, fromDate, toDate]);
+  }, [selectedProject, fromDate, toDate, getAuth]);
 
-  // --------- Missing daily entries (today + previous 7 days) ----------
+  // Auto-run contributors when project or range changes
+  useEffect(() => {
+    if (selectedProject) computeContributorsForProject();
+  }, [selectedProject, fromDate, toDate, computeContributorsForProject]);
+
+  // --------- Missing daily entries ----------
+  // Rules:
+  // - Evaluate only up to today; future days show number but are colorless (no fill).
+  // - Today: yellow (pending) before 2 PM IST if empty, red after 2 PM.
+  // - If today is the 1st, prepend last 7 days from previous month.
+  // - "Filled" means BOTH utilization AND project entries exist; otherwise it's missing.
+  // - If an employee is only missing *today* and time < 2 PM IST, we don't count them as missing.
+  const runIdRef = useRef(0);
+
   const computeMissingDailyEntries = useCallback(async () => {
     if (!teamId || employees.length === 0) {
       setMissingRows([]);
       setMissingByEmp({});
+      setSelectedCalEmpId(null);
       return;
     }
     setLoadingMissing(true);
+    const myRunId = ++runIdRef.current;
 
-    const perEmp = {};
     try {
+      const todayYMD = ymdIST(today);
+      const todayISTDate = parseISO(todayYMD);
+      const isFirstOfMonth = todayISTDate.getDate() === 1;
+
+      // IST hour (00-23)
+      const istHour = Number(
+        new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Kolkata',
+          hour: '2-digit',
+          hour12: false
+        }).format(new Date())
+      );
+      const cutoffHour = 14; // 2 PM IST
+
+      // Previous-week days if 1st of month
+      const prevWeekDays = [];
+      if (isFirstOfMonth) {
+        const startPrev = new Date(todayISTDate);
+        startPrev.setDate(startPrev.getDate() - 7); // 7 days before today
+        const cur = new Date(startPrev);
+        while (cur < todayISTDate) {
+          prevWeekDays.push(ymdIST(cur));
+          cur.setDate(cur.getDate() + 1);
+        }
+      }
+
+      // Display sequence: prev-week (if any) + full current month
+      const displayDays = isFirstOfMonth ? [...prevWeekDays, ...monthDays] : [...monthDays];
+
+      const perEmp = {};
       for (const emp of employees) {
         const name = `${emp.first_name || ''} ${emp.last_name || ''}`.trim() || `Emp ${emp.employee_id}`;
         const days = [];
         let missingCount = 0;
 
-        for (const d of last8Days) {
-          let filled = false;
+        for (const d of displayDays) {
+          // Future of today → still show the number later, but we don't call API
+          if (d > todayYMD) {
+            days.push({ date: d, state: 'future', weekendIgnored: false });
+            continue;
+          }
+
+          // Fetch daily summary
+          let hasBoth = false;
           try {
             const { data } = await axios.get(
               `/api/daily-entries/${emp.employee_id}/${d}/summary`,
               getAuth()
             );
-            filled = !!data?.has_any_entry; // green if any util OR project entry exists
+            if (typeof data?.has_both_entry === 'boolean') {
+              hasBoth = data.has_both_entry;
+            } else {
+              const utilCnt = Number(data?.activities_count || 0);
+              const projCnt = Number(data?.projects_count || 0);
+              hasBoth = utilCnt > 0 && projCnt > 0;
+            }
           } catch {
-            filled = false; // treat error as not filled
+            hasBoth = false; // treat error as missing
           }
-          if (!filled) missingCount += 1;
-          days.push({ date: d, filled });
+
+          const weekend = isWeekendISO(d);
+          const weekendIgnored = weekend && !hasBoth;
+          const isToday = d === todayYMD;
+
+          let state;
+          if (hasBoth) state = 'filled';
+          else if (isToday && istHour < cutoffHour) state = 'pending';
+          else state = 'missing';
+
+          // Count missing only for weekdays, excluding pending-before-2PM-today
+          if (!hasBoth && !weekend && !(isToday && istHour < cutoffHour)) {
+            missingCount += 1;
+          }
+
+          days.push({ date: d, state, weekendIgnored });
         }
 
         perEmp[emp.employee_id] = { name, days, missingCount };
       }
 
+      // Only employees with at least one missing weekday
       const rows = Object.entries(perEmp)
         .filter(([, v]) => v.missingCount > 0)
         .map(([eid, v]) => ({
@@ -374,22 +498,22 @@ function Dashboard({ user }) {
         }))
         .sort((a, b) => b.missingCount - a.missingCount || a.employee_name.localeCompare(b.employee_name));
 
+      if (myRunId !== runIdRef.current) return;
+
       setMissingByEmp(perEmp);
       setMissingRows(rows);
+
+      // Maintain selected employee for the calendar
+      setSelectedCalEmpId(prev => {
+        if (prev && perEmp[prev]) return prev;
+        return rows.length ? rows[0].employee_id : (employees[0]?.employee_id ?? null);
+      });
     } finally {
-      setLoadingMissing(false);
+      if (myRunId === runIdRef.current) setLoadingMissing(false);
     }
-  }, [teamId, employees, last8Days]); // eslint-disable-line
+  }, [teamId, employees, monthDays, today, ymdIST, getAuth]);
 
   useEffect(() => { computeMissingDailyEntries(); }, [computeMissingDailyEntries]);
-
-  const openCalendarForEmp = (empId) => {
-    const rec = missingByEmp[empId];
-    if (!rec) return;
-    setCalEmpName(rec.name);
-    setCalDays(rec.days);
-    setCalOpen(true);
-  };
 
   // Modal handlers (lists)
   const openModalFor = (title, rows) => {
@@ -413,22 +537,31 @@ function Dashboard({ user }) {
     })).sort((a, b) => a.project_name.localeCompare(b.project_name));
   }, [projectsIndex]);
 
-  // Totals for Stats (selected team only)
+  // Totals for Stats (selected team only) — dedupe projects across employees
   const totals = useMemo(() => {
     const vals = Object.values(empKpi);
-    const wipTotal = vals.reduce((s, v) => s + (v?.wip || 0), 0);
-    const crossedTotal = vals.reduce((s, v) => s + (v?.crossedECD || 0), 0);
+    const wipSet = new Set();
+    const crossedSet = new Set();
+    vals.forEach(v => {
+      (v?.wipList || []).forEach(p => {
+        if (p?.project_id != null) wipSet.add(String(p.project_id));
+      });
+      (v?.crossedList || []).forEach(p => {
+        if (p?.project_id != null) crossedSet.add(String(p.project_id));
+      });
+    });
+
     return {
       employees: employees.length,
-      wipTotal,
-      crossedTotal,
+      wipTotal: wipSet.size,           // ✅ unique WIP projects
+      crossedTotal: crossedSet.size,   // ✅ unique crossed-ECD projects
       totalHours: (utilizationHours + projectHours).toFixed(2),
       utilHours: utilizationHours.toFixed(2),
       projHours: projectHours.toFixed(2),
     };
   }, [empKpi, employees.length, utilizationHours, projectHours]);
 
-  // ---------- Compact table styling ----------
+  // ---------- Styles ----------
   const excelTableSx = {
     tableLayout: 'fixed',
     borderCollapse: 'collapse',
@@ -466,24 +599,46 @@ function Dashboard({ user }) {
     crossed: 120,
   };
 
-  // Calendar cell styles
-  const dayCell = (filled) => ({
-    p: 1,
-    textAlign: 'center',
-    borderRadius: 1,
-    border: '1px solid',
-    borderColor: 'divider',
-    bgcolor: filled ? 'success.light' : 'error.light',
-    color: filled ? 'success.contrastText' : 'error.contrastText',
+  const monthGridSx = {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(7, 28px)',
+    gap: 0.5,
+  };
+
+  const dayCircle = (bg, fg = CALENDAR_COLORS.textOnDark) => ({
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     fontSize: 12,
     fontWeight: 700,
+    bgcolor: bg,
+    color: fg,
   });
 
-  const shortDate = (iso) => {
-    // e.g., 2025-08-25 -> 25 Aug
-    const d = parseISO(iso);
-    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+  const dayPlain = {
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 12,
+    color: CALENDAR_COLORS.futureText, // hex
   };
+
+  // Calendar data for the selected employee
+  const selectedCalDays = useMemo(() => {
+    if (!selectedCalEmpId) return [];
+    return missingByEmp[selectedCalEmpId]?.days || [];
+  }, [selectedCalEmpId, missingByEmp]);
+
+  const selectedCalMissingCount = useMemo(() => {
+    if (!selectedCalEmpId) return 0;
+    return missingByEmp[selectedCalEmpId]?.missingCount || 0;
+  }, [selectedCalEmpId, missingByEmp]);
 
   return (
     <Container maxWidth="xl" sx={{ py: 2 }}>
@@ -575,7 +730,7 @@ function Dashboard({ user }) {
             alignItems: 'start',
           }}
         >
-          {/* Column 1: Employees — WIP & Crossed ECD (one Paper) */}
+          {/* Column 1: Employees — WIP & Crossed ECD */}
           <Paper
             elevation={LAYOUT.ELEVATION_DEFAULT}
             sx={{
@@ -654,9 +809,9 @@ function Dashboard({ user }) {
             )}
           </Paper>
 
-          {/* Column 2: three stacked boxes */}
+          {/* Column 2: Stats + Donut + Contributors */}
           <Box sx={{ width: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: `${GRID_GAP}px` }}>
-            {/* Box 1: Project Hours by Project (Selected Team) */}
+            {/* Donut */}
             <Paper elevation={LAYOUT.ELEVATION_DEFAULT} sx={{
               borderRadius: LAYOUT.BORDER_RADIUS,
               width: '100%',
@@ -706,7 +861,7 @@ function Dashboard({ user }) {
               </CardContent>
             </Paper>
 
-            {/* Box 2: Quick Stats (Selected Team) */}
+            {/* Stats */}
             <Paper elevation={LAYOUT.ELEVATION_DEFAULT} sx={{
               borderRadius: LAYOUT.BORDER_RADIUS,
               width: '100%',
@@ -753,7 +908,7 @@ function Dashboard({ user }) {
               </CardContent>
             </Paper>
 
-            {/* Box 3: Find Contributors by Project */}
+            {/* Contributors */}
             <Paper elevation={LAYOUT.ELEVATION_DEFAULT} sx={{
               borderRadius: LAYOUT.BORDER_RADIUS,
               width: '100%',
@@ -764,7 +919,7 @@ function Dashboard({ user }) {
               <CardHeader
                 avatar={<SearchIcon />}
                 title="Find Contributors by Project"
-                subheader="Select a project to see contributors (across all teams in date range)"
+                subheader="Contributors & total hours in the selected date range"
                 sx={{ pb: 1.5 }}
               />
               <Divider />
@@ -812,35 +967,76 @@ function Dashboard({ user }) {
                       No contributors found for this project in the selected date range.
                     </Typography>
                   ) : (
-                    <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
-                      <Table size="small" sx={excelTableSx}>
-                        <TableHead>
-                          <TableRow>
-                            <TableCell>Employee</TableCell>
-                            <TableCell align="right">Total Hours</TableCell>
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {projContribRows.map(r => (
-                            <TableRow key={r.employee_id} hover>
-                              <TableCell>
-                                <Typography className="cell-mono">{r.employee_name}</Typography>
-                              </TableCell>
-                              <TableCell align="right">
-                                {r.total_hours.toFixed(2)}
-                              </TableCell>
+                    <>
+                      {/* Total for the project in range */}
+                      <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5, borderRadius: 2 }}>
+                        <Typography variant="subtitle2">
+                          Total hours (selected range):{' '}
+                          {projContribRows.reduce((s, r) => s + r.total_hours, 0).toFixed(2)} hrs
+                        </Typography>
+                      </Paper>
+
+                      <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
+                        <Table size="small" sx={excelTableSx}>
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>Employee</TableCell>
+                              <TableCell align="right" sx={{ width: 420 }}>Hours (range)</TableCell>
                             </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </Paper>
+                          </TableHead>
+                          <TableBody>
+                            {(() => {
+                              const maxHours = Math.max(
+                                1,
+                                ...projContribRows.map(r => Number(r.total_hours || 0))
+                              );
+
+                              return projContribRows.map(r => {
+                                const pct = Math.max(0, Math.min(100, (r.total_hours / maxHours) * 100));
+                                return (
+                                  <TableRow key={r.employee_id} hover>
+                                    <TableCell>
+                                      <Typography className="cell-mono">{r.employee_name}</Typography>
+                                    </TableCell>
+                                    <TableCell align="right">
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Box
+                                          sx={{
+                                            flex: 1,
+                                            height: 8,
+                                            bgcolor: 'action.hover',
+                                            borderRadius: 1,
+                                            overflow: 'hidden',
+                                          }}
+                                        >
+                                          <Box
+                                            sx={{
+                                              width: `${pct}%`,
+                                              height: '100%',
+                                              bgcolor: 'primary.main',
+                                            }}
+                                          />
+                                        </Box>
+                                        <Typography variant="body2" sx={{ minWidth: 72, textAlign: 'right' }}>
+                                          {r.total_hours.toFixed(2)}
+                                        </Typography>
+                                      </Box>
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              });
+                            })()}
+                          </TableBody>
+                        </Table>
+                      </Paper>
+                    </>
                   )}
                 </Box>
               </CardContent>
             </Paper>
           </Box>
 
-          {/* Column 3: Users with Missing Daily Entries (last 8 days) */}
+          {/* Column 3: Missing Daily Entries — Single Calendar + User list */}
           <Paper
             elevation={LAYOUT.ELEVATION_DEFAULT}
             sx={{
@@ -855,53 +1051,117 @@ function Dashboard({ user }) {
           >
             <CardHeader
               avatar={<CalendarMonthIcon />}
-              title="Users Missing Daily Entries"
-              subheader="Today and previous 7 days"
+              title="Missing Entries"
               sx={{ pb: 0.5 }}
             />
             <Divider />
-            <CardContent sx={{ p: 0 }}>
+            <CardContent sx={{ p: 2 }}>
               {loadingMissing ? (
                 <Stack alignItems="center" sx={{ py: 6 }}>
                   <CircularProgress />
                 </Stack>
               ) : employees.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                <Typography variant="body2" color="text.secondary">
                   {teamId ? 'No employees found.' : 'Select a team to view status.'}
                 </Typography>
               ) : missingRows.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-                  Great! Everyone has filled entries for the last 8 days.
+                <Typography variant="body2" color="text.secondary">
+                  Great! No missing weekday entries based on the current rules.
                 </Typography>
               ) : (
-                <Box sx={{ p: 2 }}>
-                  <Table size="small" sx={excelTableSx}>
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Employee</TableCell>
-                        <TableCell align="right">Days not filled</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {missingRows.map((r) => (
-                        <TableRow key={r.employee_id} hover>
-                          <TableCell>
-                            <Typography className="cell-mono">{r.employee_name}</Typography>
-                          </TableCell>
-                          <TableCell align="right">
-                            <Chip
-                              size="small"
-                              color="error"
-                              variant="outlined"
-                              label={r.missingCount}
-                              className="click-chip"
-                              onClick={() => openCalendarForEmp(r.employee_id)}
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: '260px 1fr',
+                    gap: 2,
+                    alignItems: 'start',
+                  }}
+                >
+                  {/* User list (employees with missing entries) */}
+                  <Paper variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
+                    <Box sx={{ px: 1.5, py: 1 }}>
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        Users (missed entries)
+                      </Typography>
+                    </Box>
+                    <Divider />
+                    <List dense disablePadding sx={{ maxHeight: 420, overflow: 'auto' }}>
+                      {missingRows.map(row => {
+                        const isSelected = selectedCalEmpId === row.employee_id;
+                        return (
+                          <ListItemButton
+                            key={row.employee_id}
+                            selected={isSelected}
+                            onClick={() => setSelectedCalEmpId(row.employee_id)}
+                            sx={{ py: 0.5 }}
+                          >
+                            <ListItemText
+                              primaryTypographyProps={{ sx: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13 } }}
+                              primary={row.employee_name}
+                              secondary={`Missing: ${row.missingCount}`}
                             />
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                          </ListItemButton>
+                        );
+                      })}
+                    </List>
+                  </Paper>
+
+                  {/* Single calendar for the selected user */}
+                  <Paper variant="outlined" sx={{ borderRadius: 2, p: 1.5 }}>
+                    {!selectedCalEmpId ? (
+                      <Typography variant="body2" color="text.secondary">
+                        Select a user from the list to view the calendar.
+                      </Typography>
+                    ) : (
+                      <Stack spacing={1}>
+                        <Stack direction="row" spacing={2} alignItems="center">
+                          <Typography variant="subtitle2" fontWeight={800}>
+                            {missingByEmp[selectedCalEmpId]?.name}
+                          </Typography>
+                          <Chip size="small" color="error" variant="outlined" label={`Missing weekdays: ${selectedCalMissingCount}`} />
+                        </Stack>
+
+                        {/* Weekday headers */}
+                        <Stack direction="row" spacing={0.5} sx={{ mb: 0.5 }}>
+                          {['S','M','T','W','T','F','S'].map((d) => (
+                            <Box key={d} sx={{ width: 28, textAlign: 'center', fontSize: 11, color: 'text.secondary' }}>{d}</Box>
+                          ))}
+                        </Stack>
+
+                        {/* Calendar grid */}
+                        <Box sx={monthGridSx}>
+                          {(() => {
+                            const days = selectedCalDays;
+                            if (days.length === 0) return null;
+                            const first = parseISO(days[0].date);
+                            const pad = first.getDay();
+                            return Array.from({ length: pad }).map((_, i) => <span key={`pad-${i}`} />);
+                          })()}
+
+                          {selectedCalDays.map(({ date, state, weekendIgnored }) => {
+                            const dnum = parseISO(date).getDate();
+
+                            if (state === 'future') {
+                              return <Box key={date} sx={dayPlain}>{dnum}</Box>;
+                            }
+
+                            let sx;
+                            if (state === 'filled') {
+                              sx = dayCircle(CALENDAR_COLORS.filledBg);
+                            } else if (state === 'pending') {
+                              sx = dayCircle(CALENDAR_COLORS.pendingBg);
+                            } else if (weekendIgnored) {
+                              sx = dayCircle(CALENDAR_COLORS.weekendBg, CALENDAR_COLORS.textOnDark);
+                            } else {
+                              sx = dayCircle(CALENDAR_COLORS.missingBg);
+                            }
+
+                            return <Box key={date} sx={sx}>{dnum}</Box>;
+                          })}
+                        </Box>
+                      </Stack>
+                    )}
+                  </Paper>
                 </Box>
               )}
             </CardContent>
@@ -939,33 +1199,6 @@ function Dashboard({ user }) {
           )}
           <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
             <Button onClick={() => setModalOpen(false)}>Close</Button>
-          </Stack>
-        </DialogContent>
-      </Dialog>
-
-      {/* Calendar Modal (per-employee last 8 days) */}
-      <Dialog open={calOpen} onClose={() => setCalOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>{calEmpName} — Last 8 Days</DialogTitle>
-        <DialogContent dividers>
-          {calDays.length === 0 ? (
-            <Typography variant="body2" color="text.secondary">No data found.</Typography>
-          ) : (
-            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1 }}>
-              {calDays.map(({ date, filled }) => (
-                <Box key={date} sx={dayCell(filled)}>
-                  <div>{shortDate(date)}</div>
-                  <div style={{ fontSize: 10, fontWeight: 600 }}>
-                    {filled ? 'Filled' : 'Not filled'}
-                  </div>
-                </Box>
-              ))}
-            </Box>
-          )}
-          <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              Red = not filled, Green = filled
-            </Typography>
-            <Button onClick={() => setCalOpen(false)}>Close</Button>
           </Stack>
         </DialogContent>
       </Dialog>
