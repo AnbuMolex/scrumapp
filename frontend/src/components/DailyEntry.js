@@ -335,6 +335,11 @@ function DailyEntry({ user }) {
       const activities = utilizationEntries
         .filter(e => norm(e.activity) && e.hours !== '' && e.hours != null)
         .map(e => ({ activity: norm(e.activity), hours: Number(e.hours), comments: norm(e.comments) || null }));
+
+      if (activities.length === 0) {
+        setToast({ open: true, severity: 'error', msg: 'No valid activities found. Please enter at least one.' });
+        return;
+      }
   
       setBusy(true);
       try {
@@ -356,9 +361,15 @@ function DailyEntry({ user }) {
   
     const saveProjects = async () => {
       if (!selectedEmployeeId || !selectedDate) {
-        setToast({ open: true, severity: 'warning', msg: 'Select team, employee, and date.' });
+        setToast({ 
+          open: true, 
+          severity: 'warning', 
+          msg: 'Select team, employee, and date.', 
+          autoHideDuration: 3000 
+        });
         return;
       }
+    
       const projPayloads = projectEntries
         .filter(p => norm(p.project_id))
         .map(p => {
@@ -373,6 +384,7 @@ function DailyEntry({ user }) {
             comments:     norm(p.emp_comments) || null,
             hours:        (p.emp_hours === '' || p.emp_hours == null) ? 0 : Number(p.emp_hours),
           };
+    
           if (p.depu_id) {
             return axios.put(
               `/api/employee/${selectedEmployeeId}/projects/${encodeURIComponent(p.project_id)}`,
@@ -380,25 +392,47 @@ function DailyEntry({ user }) {
               getAuth()
             );
           }
+    
           return axios.post(
             `/api/employee/${selectedEmployeeId}/projects`,
             { projectId: norm(p.project_id), ...base },
             getAuth()
           );
         });
-  
+    
+      if (projPayloads.length === 0) {
+        setToast({ 
+          open: true, 
+          severity: 'error', 
+          msg: 'No valid projects to save.', 
+          autoHideDuration: 3000 
+        });
+        return;
+      }
+    
       setBusy(true);
       try {
         await Promise.all(projPayloads);
-        setToast({ open: true, severity: 'success', msg: 'Projects saved.' });
+        setToast({ 
+          open: true, 
+          severity: 'success', 
+          msg: 'Projects saved.', 
+          autoHideDuration: 3000 
+        });
         fetchProjects();
       } catch (err) {
         const msg = err?.response?.data?.message || err?.response?.data?.error || 'Save failed.';
-        setToast({ open: true, severity: 'error', msg });
+        setToast({ 
+          open: true, 
+          severity: 'error', 
+          msg, 
+          autoHideDuration: 3000 
+        });
       } finally {
         setBusy(false);
       }
     };
+    
 
   // ---------- Render ----------
   if (!user?.employee_id) {
